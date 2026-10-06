@@ -1091,7 +1091,6 @@ class DashboardServer:
 
     def _setup_routes(self):
         self.app.router.add_get("/", self.handle_index)
-        self.app.router.add_head("/", self.handle_head)
         self.app.router.add_get("/health", self.handle_health)
         self.app.router.add_get("/ping", self.handle_health)
         self.app.router.add_post("/api/auth", self.handle_auth)
@@ -1107,9 +1106,6 @@ class DashboardServer:
 
     async def handle_index(self, request: web.Request) -> web.Response:
         return web.Response(text=_HTML_PAGE, content_type="text/html")
-
-    async def handle_head(self, request: web.Request) -> web.Response:
-        return web.Response(status=200, content_type="text/html")
 
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({
