@@ -50,7 +50,7 @@ BOT_OWNER_ID     = int(os.getenv("BOT_OWNER_ID", "0"))
 # ══════════════════════════════════════════════════════════════════
 
 DASHBOARD_ENABLED  = os.getenv("DASHBOARD_ENABLED", "true").lower() in ("true", "1", "yes")
-DASHBOARD_PORT     = int(os.getenv("PORT", os.getenv("DASHBOARD_PORT", "8080")))
+DASHBOARD_PORT     = int(os.getenv("SERVER_PORT", os.getenv("PORT", os.getenv("DASHBOARD_PORT", os.getenv("APP_PORT", "8080")))))
 DASHBOARD_HOST     = os.getenv("DASHBOARD_HOST", "0.0.0.0")
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "aishu2026")
 
