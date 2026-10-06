@@ -1,0 +1,61 @@
+# Environment & Secrets (Never commit credentials)
+.env
+.env.local
+.env.*.local
+*.env
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Databases & local state
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Runtime logs & exports
+data/logs/*.log
+*.log
+logs/
+data/exports/*.json
+data/model_rankings/*.json
+data/guilds/*.json
+data/users/*.json
+data/server/*.json
+
+# Preserve folder structure
+!data/**/.gitkeep
+
+# Operating System & IDE artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+*.swp
+*.swo
+*~
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
