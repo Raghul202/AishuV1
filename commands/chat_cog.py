@@ -421,7 +421,7 @@ def _diary_embed(user: discord.User | discord.Member, um) -> discord.Embed:
     return embed
 
 
-def _moments_embed(user: discord.User | discord.Member, um) -> discord.Embed:
+def _moments_embed(user: discord.User | discord.Member, um, is_dm: bool = False) -> discord.Embed:
     embed = discord.Embed(
         title=f"✨ Cherished Moments with {user.display_name}",
         description="special things we've shared that i hold onto 🌸",
@@ -437,7 +437,7 @@ def _moments_embed(user: discord.User | discord.Member, um) -> discord.Embed:
     if prefs:
         embed.add_field(name="❤️ Things You Love", value="\n".join(f"• {p[:80]}" for p in prefs[-4:]), inline=False)
 
-    if um.roleplay and (um.roleplay.is_active or um.roleplay.session_history):
+    if is_dm and aishu_state.is_partner(user.id) and um.roleplay and (um.roleplay.is_active or um.roleplay.session_history):
         active = um.roleplay.active_session
         eps = active.episode_memories if active else []
         if not eps and um.roleplay.session_history:
@@ -466,6 +466,7 @@ def _persona_embed(bot: commands.Bot) -> discord.Embed:
         embed.set_thumbnail(url=bot.user.display_avatar.url)
     embed.add_field(name="Name", value=aishu_state.name, inline=True)
     embed.add_field(name="Age", value=f"{aishu_state.age} years old", inline=True)
+    embed.add_field(name="Creator", value="**Raghul M** (Raghul)", inline=True)
     embed.add_field(name="Mood", value=f"{aishu_state.mood.mood} {aishu_state.mood.emoji}", inline=True)
     embed.add_field(name="Personality", value=aishu_state.personality, inline=False)
     embed.add_field(name="Likes", value=aishu_state.likes, inline=True)
@@ -474,7 +475,7 @@ def _persona_embed(bot: commands.Bot) -> discord.Embed:
     embed.add_field(name="Style", value="Casual, lowercase, warm, observant, natural banter", inline=False)
     if aishu_state.custom_note:
         embed.add_field(name="Special Trait", value=aishu_state.custom_note, inline=False)
-    embed.set_footer(text="Aishu ✿ • never an assistant, always herself")
+    embed.set_footer(text="Aishu ✿ • created by Raghul M • never an assistant, always herself")
     return embed
 
 
@@ -620,21 +621,25 @@ class ChatCog(commands.Cog, name="Chat"):
             await interaction.response.send_message(fb, ephemeral=True)
             return
         await interaction.response.defer()
-        guild_id = interaction.guild.id if interaction.guild else 0
-        result   = await brain_router.process(
-            user_id      = uid,
-            username     = str(interaction.user),
-            display_name = interaction.user.display_name,
-            text         = message,
-            guild_id     = guild_id,
-            channel_id   = interaction.channel.id if interaction.channel else 0,
-            is_dm        = not bool(interaction.guild),
-            is_mention   = True,
-        )
-        await interaction.followup.send(result.chunks[0] if result.chunks else "🌸")
-        for chunk in result.chunks[1:]:
-            await asyncio.sleep(random.uniform(0.3, 0.7))
-            await interaction.followup.send(chunk)
+        try:
+            guild_id = interaction.guild.id if interaction.guild else 0
+            result   = await brain_router.process(
+                user_id      = uid,
+                username     = str(interaction.user),
+                display_name = interaction.user.display_name,
+                text         = message,
+                guild_id     = guild_id,
+                channel_id   = interaction.channel.id if interaction.channel else 0,
+                is_dm        = not bool(interaction.guild),
+                is_mention   = True,
+            )
+            await interaction.followup.send(result.chunks[0] if result.chunks else "🌸")
+            for chunk in result.chunks[1:]:
+                await asyncio.sleep(random.uniform(0.3, 0.7))
+                await interaction.followup.send(chunk)
+        except Exception as exc:
+            log.error(f"slash_chat error: {exc}", exc_info=True)
+            await interaction.followup.send("something went wrong while thinking of a reply 😅", ephemeral=True)
 
     @app_commands.command(name="image", description="Create an image with Aishu")
     @app_commands.describe(prompt="Describe the image you want")
@@ -643,19 +648,23 @@ class ChatCog(commands.Cog, name="Chat"):
             await interaction.response.send_message("slow down a sec~", ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
-        start_t = time.monotonic()
-        image, error = await asyncio.to_thread(image_generator.generate, prompt)
-        duration = time.monotonic() - start_t
-        if not image:
-            await interaction.followup.send(error, ephemeral=True)
-            return
-        show_embed = memory_manager.db.get_state("image_embed_enabled", True) if memory_manager.db else True
-        img_file = discord.File(io.BytesIO(image.data), filename=image.filename)
-        if show_embed:
-            embed = _image_result_embed(self.bot, image, prompt, duration)
-            await interaction.followup.send(embed=embed, file=img_file)
-        else:
-            await interaction.followup.send(file=img_file)
+        try:
+            start_t = time.monotonic()
+            image, error = await asyncio.to_thread(image_generator.generate, prompt)
+            duration = time.monotonic() - start_t
+            if not image:
+                await interaction.followup.send(error, ephemeral=True)
+                return
+            show_embed = memory_manager.db.get_state("image_embed_enabled", True) if memory_manager.db else True
+            img_file = discord.File(io.BytesIO(image.data), filename=image.filename)
+            if show_embed:
+                embed = _image_result_embed(self.bot, image, prompt, duration)
+                await interaction.followup.send(embed=embed, file=img_file)
+            else:
+                await interaction.followup.send(file=img_file)
+        except Exception as exc:
+            log.error(f"slash_image error: {exc}", exc_info=True)
+            await interaction.followup.send("couldn't generate the image right now 😅", ephemeral=True)
 
     @app_commands.command(name="memories", description="See what Aishu remembers about you 🌸")
     async def slash_memories(self, interaction: discord.Interaction):
@@ -722,8 +731,12 @@ class ChatCog(commands.Cog, name="Chat"):
             await interaction.response.send_message("use in a server! 🌸", ephemeral=True)
             return
         await interaction.response.defer()
-        embed = _leaderboard_embed(interaction.guild, self.bot)
-        await interaction.followup.send(embed=embed)
+        try:
+            embed = _leaderboard_embed(interaction.guild, self.bot)
+            await interaction.followup.send(embed=embed)
+        except Exception as exc:
+            log.error(f"slash_lb error: {exc}", exc_info=True)
+            await interaction.followup.send("couldn't load the leaderboard right now 😅", ephemeral=True)
 
     @app_commands.command(name="mood", description="Check Aishu's current mood")
     async def slash_mood(self, interaction: discord.Interaction):
@@ -1041,10 +1054,12 @@ class ChatCog(commands.Cog, name="Chat"):
     @app_commands.describe(user="Leave blank for yourself")
     async def slash_bond(self, interaction: discord.Interaction, user: discord.User = None):
         target = user or interaction.user
+        if target.id != interaction.user.id and not (interaction.guild and getattr(interaction.user, "guild_permissions", None) and interaction.user.guild_permissions.administrator):
+            target = interaction.user
         guild_id = interaction.guild.id if interaction.guild else 0
         um = memory_manager.load(target.id, str(target), target.display_name)
         embed = _bond_embed(target, um, guild_id)
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # /diary
     @app_commands.command(name="diary", description="Read a page from Aishu's personal diary 📖")
@@ -1058,9 +1073,13 @@ class ChatCog(commands.Cog, name="Chat"):
     @app_commands.describe(user="Leave blank for yourself")
     async def slash_moments(self, interaction: discord.Interaction, user: discord.User = None):
         target = user or interaction.user
+        if target.id != interaction.user.id:
+            await interaction.response.send_message("you can only view your own moments with Aishu 🌸", ephemeral=True)
+            return
+        is_dm = not bool(interaction.guild)
         um = memory_manager.load(target.id, str(target), target.display_name)
-        embed = _moments_embed(target, um)
-        await interaction.response.send_message(embed=embed)
+        embed = _moments_embed(target, um, is_dm=is_dm)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # /continue
     @app_commands.command(name="continue", description="Continue the conversation or active roleplay story 💬")
@@ -1070,29 +1089,33 @@ class ChatCog(commands.Cog, name="Chat"):
             await interaction.response.send_message("slow down a sec~", ephemeral=True)
             return
         await interaction.response.defer()
-        uid = interaction.user.id
-        guild_id = interaction.guild.id if interaction.guild else 0
-        um = memory_manager.load(uid, str(interaction.user), interaction.user.display_name)
-        p = prompt.strip()
-        if um.roleplay and um.roleplay.is_active:
-            text = f"continue: {p}" if p else "please continue the story naturally from where we left off"
-        else:
-            text = f"continue: {p}" if p else "continue what you were saying earlier"
-
-        result = await brain_router.process(
-            user_id=uid, username=str(interaction.user), display_name=interaction.user.display_name,
-            text=text, guild_id=guild_id, channel_id=interaction.channel_id,
-            is_dm=not bool(interaction.guild),
-        )
-        if not result.chunks:
-            await interaction.followup.send("i couldn't think of what to say next 😅 say something to me!")
-            return
-        for i, chunk in enumerate(result.chunks):
-            if i == 0:
-                await interaction.followup.send(chunk)
+        try:
+            uid = interaction.user.id
+            guild_id = interaction.guild.id if interaction.guild else 0
+            um = memory_manager.load(uid, str(interaction.user), interaction.user.display_name)
+            p = prompt.strip()
+            if um.roleplay and um.roleplay.is_active:
+                text = f"continue: {p}" if p else "please continue the story naturally from where we left off"
             else:
-                await asyncio.sleep(random.uniform(0.3, 0.7))
-                await interaction.followup.send(chunk)
+                text = f"continue: {p}" if p else "continue what you were saying earlier"
+
+            result = await brain_router.process(
+                user_id=uid, username=str(interaction.user), display_name=interaction.user.display_name,
+                text=text, guild_id=guild_id, channel_id=interaction.channel_id,
+                is_dm=not bool(interaction.guild),
+            )
+            if not result.chunks:
+                await interaction.followup.send("i couldn't think of what to say next 😅 say something to me!")
+                return
+            for i, chunk in enumerate(result.chunks):
+                if i == 0:
+                    await interaction.followup.send(chunk)
+                else:
+                    await asyncio.sleep(random.uniform(0.3, 0.7))
+                    await interaction.followup.send(chunk)
+        except Exception as exc:
+            log.error(f"slash_continue error: {exc}", exc_info=True)
+            await interaction.followup.send("couldn't continue the conversation right now 😅", ephemeral=True)
 
     # /quietmode
     @app_commands.command(name="quietmode", description="Toggle quiet mode for this channel or server 🤫")
@@ -1172,8 +1195,12 @@ class ChatCog(commands.Cog, name="Chat"):
                 return
         n = max(1, min(amount, 100))
         await interaction.response.defer(ephemeral=True)
-        deleted = await interaction.channel.purge(limit=n)
-        await interaction.followup.send(f"Deleted **{len(deleted)}** messages 🗑️", ephemeral=True)
+        try:
+            deleted = await interaction.channel.purge(limit=n)
+            await interaction.followup.send(f"Deleted **{len(deleted)}** messages 🗑️", ephemeral=True)
+        except Exception as exc:
+            log.error(f"slash_purge error: {exc}", exc_info=True)
+            await interaction.followup.send(f"failed to purge messages: {exc}", ephemeral=True)
 
     # ─── Prefix commands ──────────────────────────────────────────────────────
 
@@ -1264,21 +1291,36 @@ class ChatCog(commands.Cog, name="Chat"):
             for w in words:
                 if w.startswith("http://") or w.startswith("https://"):
                     try:
-                        import requests
-                        from urllib.parse import urlparse
+                        import ipaddress
                         import socket
+                        from urllib.parse import urlparse
+                        import requests
                         parsed = urlparse(w)
+                        if parsed.scheme not in ("http", "https"):
+                            continue
                         hostname = parsed.hostname or ""
-                        # SSRF protection: reject localhost and private IP addresses
-                        if hostname.lower() in ("localhost", "127.0.0.1", "::1") or hostname.endswith(".local"):
+                        if not hostname or hostname.lower() in ("localhost", "127.0.0.1", "::1") or hostname.endswith(".local"):
                             continue
-                        ip = socket.gethostbyname(hostname)
-                        if ip.startswith(("127.", "10.", "192.168.", "169.254.")) or (ip.startswith("172.") and 16 <= int(ip.split(".")[1]) <= 31):
+                        ip_str = socket.gethostbyname(hostname)
+                        ip_obj = ipaddress.ip_address(ip_str)
+                        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_reserved:
                             continue
-                        r = await asyncio.to_thread(requests.get, w, timeout=10)
-                        if r.status_code == 200 and r.headers.get("content-type", "").startswith("image/"):
-                            image_bytes = r.content
-                            mime_type = r.headers.get("content-type", "image/png")
+
+                        def _fetch():
+                            with requests.get(w, timeout=10, stream=True, allow_redirects=False) as r:
+                                if r.status_code == 200 and r.headers.get("content-type", "").startswith("image/"):
+                                    data = b""
+                                    for chunk in r.iter_content(chunk_size=65536):
+                                        data += chunk
+                                        if len(data) > 10 * 1024 * 1024:
+                                            return None, None
+                                    return data, r.headers.get("content-type", "image/png")
+                                return None, None
+
+                        fetched_bytes, fetched_mime = await asyncio.to_thread(_fetch)
+                        if fetched_bytes:
+                            image_bytes = fetched_bytes
+                            mime_type = fetched_mime
                             prompt = prompt.replace(w, "").strip()
                             break
                     except Exception:
@@ -1486,6 +1528,8 @@ class ChatCog(commands.Cog, name="Chat"):
     @commands.cooldown(1, 4, commands.BucketType.user)
     async def bond_cmd(self, ctx: commands.Context, member: discord.Member = None):
         target = member or ctx.author
+        if target.id != ctx.author.id and not (ctx.guild and getattr(ctx.author, "guild_permissions", None) and ctx.author.guild_permissions.administrator):
+            target = ctx.author
         guild_id = ctx.guild.id if ctx.guild else 0
         um = memory_manager.load(target.id, str(target), target.display_name)
         embed = _bond_embed(target, um, guild_id)
@@ -1502,8 +1546,12 @@ class ChatCog(commands.Cog, name="Chat"):
     @commands.cooldown(1, 4, commands.BucketType.user)
     async def moments_cmd(self, ctx: commands.Context, member: discord.Member = None):
         target = member or ctx.author
+        if target.id != ctx.author.id:
+            await ctx.send("you can only view your own moments with Aishu 🌸", delete_after=4)
+            return
+        is_dm = not bool(ctx.guild)
         um = memory_manager.load(target.id, str(target), target.display_name)
-        embed = _moments_embed(target, um)
+        embed = _moments_embed(target, um, is_dm=is_dm)
         await ctx.send(embed=embed)
 
     @commands.command(name="persona")
@@ -1680,6 +1728,7 @@ class ChatCog(commands.Cog, name="Chat"):
         embed.set_thumbnail(url=self.bot.user.display_avatar.url)
         embed.add_field(name="Name",       value=aishu_state.name,      inline=True)
         embed.add_field(name="Age",        value=str(aishu_state.age),  inline=True)
+        embed.add_field(name="Creator",    value="Raghul M",            inline=True)
         embed.add_field(name="Mood",
                         value=f"{aishu_state.mood.mood} {aishu_state.mood.emoji}", inline=True)
         embed.add_field(name="Intensity",
@@ -1689,7 +1738,7 @@ class ChatCog(commands.Cog, name="Chat"):
         embed.add_field(name="Uptime",     value=f"{hours}h {minutes}m",     inline=True)
         embed.add_field(name="Latency",    value=f"{round(self.bot.latency*1000)}ms", inline=True)
         embed.add_field(name="Python",     value=platform.python_version(),  inline=True)
-        embed.set_footer(text=f"personality: {aishu_state.personality}")
+        embed.set_footer(text=f"personality: {aishu_state.personality} • created by Raghul M")
         return embed
 
     def _serverinfo_embed(self, guild: discord.Guild) -> discord.Embed:

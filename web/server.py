@@ -16,14 +16,19 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import io
+import ipaddress
 import json
 import os
+import socket
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 from aiohttp import web
 import aiohttp
+from aiohttp.abc import AbstractResolver
 import discord
 
 import config.settings as cfg
@@ -34,12 +39,29 @@ from utilities.logger import get_logger
 
 log = get_logger("web.dashboard")
 
+
+class _PublicAddressResolver(AbstractResolver):
+    """Resolver that permits connections only to globally routable addresses."""
+
+    def __init__(self):
+        self._resolver = aiohttp.resolver.DefaultResolver()
+
+    async def resolve(self, host: str, port: int = 0, family: int = socket.AF_UNSPEC) -> list[dict]:
+        addresses = await self._resolver.resolve(host, port, family)
+        if not addresses or any(not ipaddress.ip_address(item["host"]).is_global for item in addresses):
+            raise OSError("Image host resolves to a non-public address")
+        return addresses
+
+    async def close(self) -> None:
+        await self._resolver.close()
+
 _HTML_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Aishu • Companion Control Dashboard</title>
+<title>Aishu</title>
+{FAVICON_LINK}
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -1105,7 +1127,17 @@ class DashboardServer:
         self.app.router.add_post("/api/settings/feature", self.handle_feature_toggle)
 
     async def handle_index(self, request: web.Request) -> web.Response:
-        return web.Response(text=_HTML_PAGE, content_type="text/html")
+        favicon_link = ""
+        if self.bot and self.bot.user:
+            try:
+                avatar_url = html.escape(str(self.bot.user.display_avatar.url), quote=True)
+                favicon_link = f'<link rel="icon" href="{avatar_url}">'
+            except Exception:
+                pass
+        return web.Response(
+            text=_HTML_PAGE.replace("{FAVICON_LINK}", favicon_link),
+            content_type="text/html",
+        )
 
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({
@@ -1138,10 +1170,33 @@ class DashboardServer:
                 return None
         elif source.startswith("http://") or source.startswith("https://"):
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(source, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        if resp.status == 200:
-                            return await resp.read()
+                parsed = urlparse(source)
+                if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                    return None
+                try:
+                    if not ipaddress.ip_address(parsed.hostname).is_global:
+                        return None
+                except ValueError:
+                    pass
+
+                timeout = aiohttp.ClientTimeout(total=10)
+                connector = aiohttp.TCPConnector(
+                    resolver=_PublicAddressResolver(), use_dns_cache=False,
+                )
+                async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+                    async with session.get(source, allow_redirects=False) as resp:
+                        if resp.status != 200 or not resp.content_type.startswith("image/"):
+                            return None
+                        content_length = resp.content_length
+                        max_size = 8 * 1024 * 1024
+                        if content_length is not None and content_length > max_size:
+                            return None
+                        image = bytearray()
+                        async for chunk in resp.content.iter_chunked(64 * 1024):
+                            image.extend(chunk)
+                            if len(image) > max_size:
+                                return None
+                        return bytes(image)
             except Exception as e:
                 log.warning(f"Failed to fetch image from URL {source}: {e}")
                 return None

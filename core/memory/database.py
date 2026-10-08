@@ -141,25 +141,29 @@ class AishuDatabase:
                         (data["user_id"], scope),
                     ).fetchall())
                 ]
-                # UserMemory saves a rolling snapshot.  Persist just the new
-                # tail, including after an interval-delayed save, instead of
-                # deleting/reinserting the entire conversation every turn.
-                overlap = 0
-                for size in range(min(len(existing), len(incoming)), 0, -1):
-                    if existing[-size:] == incoming[:size]:
-                        overlap = size
-                        break
-                new_rows = incoming[overlap:]
-                if new_rows:
-                    db.executemany(
-                        "INSERT INTO conversations(user_id,scope,role,content) VALUES(?,?,?,?)",
-                        [(data["user_id"], scope, role, content) for role, content in new_rows],
-                    )
-                db.execute("""DELETE FROM conversations
-                    WHERE user_id = ? AND scope = ? AND id NOT IN (
-                        SELECT id FROM conversations WHERE user_id = ? AND scope = ?
-                        ORDER BY id DESC LIMIT 12
-                    )""", (data["user_id"], scope, data["user_id"], scope))
+                if not incoming:
+                    db.execute("DELETE FROM conversations WHERE user_id = ? AND scope = ?", (data["user_id"], scope))
+                else:
+                    overlap = 0
+                    for size in range(min(len(existing), len(incoming)), 0, -1):
+                        if existing[-size:] == incoming[:size]:
+                            overlap = size
+                            break
+                    if overlap == 0 and existing:
+                        db.execute("DELETE FROM conversations WHERE user_id = ? AND scope = ?", (data["user_id"], scope))
+                        new_rows = incoming
+                    else:
+                        new_rows = incoming[overlap:]
+                    if new_rows:
+                        db.executemany(
+                            "INSERT INTO conversations(user_id,scope,role,content) VALUES(?,?,?,?)",
+                            [(data["user_id"], scope, role, content) for role, content in new_rows],
+                        )
+                    db.execute("""DELETE FROM conversations
+                        WHERE user_id = ? AND scope = ? AND id NOT IN (
+                            SELECT id FROM conversations WHERE user_id = ? AND scope = ?
+                            ORDER BY id DESC LIMIT ?
+                        )""", (data["user_id"], scope, data["user_id"], scope, len(incoming)))
             rows = []
             memory_sets = (
                 ("normal", (("ltm_facts", "fact"), ("ltm_prefs", "pref"), ("ltm_topics", "topic"))),
@@ -171,10 +175,17 @@ class AishuDatabase:
                         item = item if isinstance(item, dict) else {"content": str(item)}
                         content = item.get("content", "").strip()[:500]
                         if content:
-                            rows.append((item.get("item_id") or f"{scope}:{category}:{key(content)}", data["user_id"], scope, "ltm", category, content, key(content), item.get("source", "inferred"), int(item.get("importance", 5)), float(item.get("confidence", .7)), int(item.get("mention_count", 1)), json.dumps(item.get("tags", [])), item.get("created_at", data["first_seen"]), item.get("updated_at", data["last_seen"])))
+                            uid = data["user_id"]
+                            default_id = f"{uid}:{scope}:{category}:{key(content)}"
+                            item_id = item.get("item_id")
+                            if not item_id or not str(item_id).startswith(f"{uid}:"):
+                                item_id = default_id
+                            rows.append((item_id, uid, scope, "ltm", category, content, key(content), item.get("source", "inferred"), int(item.get("importance", 5)), float(item.get("confidence", .7)), int(item.get("mention_count", 1)), json.dumps(item.get("tags", [])), item.get("created_at", data["first_seen"]), item.get("updated_at", data["last_seen"])))
             for content in data.get("utm", []):
                 content = str(content).strip()[:500]
-                if content: rows.append((f"utm:{key(content)}", data["user_id"], "normal", "utm", "utm", content, key(content), "inferred", 3, .5, 1, "[]", data["last_seen"], data["last_seen"]))
+                if content:
+                    uid = data["user_id"]
+                    rows.append((f"{uid}:utm:{key(content)}", uid, "normal", "utm", "utm", content, key(content), "inferred", 3, .5, 1, "[]", data["last_seen"], data["last_seen"]))
             # Preserve existing IDs when importing legacy data whose IDs may not
             # use the current stable-key convention. This also avoids a secondary
             # unique-key collision when two old records normalize to one memory.

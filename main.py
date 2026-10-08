@@ -12,6 +12,7 @@ Startup sequence:
 """
 
 import asyncio
+import importlib.util
 import os
 import re
 import sys
@@ -21,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def ensure_requirements():
-    """Ensure required packages are installed without reinstalling on every restart."""
+    """Report missing runtime dependencies; deployment installs requirements.txt."""
     required = {
         "discord": "discord.py>=2.4.0",
         "requests": "requests>=2.31.0",
@@ -32,18 +33,15 @@ def ensure_requirements():
     }
     missing = []
     for module_name, spec in required.items():
-        try:
-            __import__(module_name)
-        except ImportError:
+        if importlib.util.find_spec(module_name) is None:
             missing.append(spec)
     if missing:
-        import subprocess
-        print(f"Installing missing required packages: {', '.join(missing)}...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", *missing, "--quiet"])
-            print("Dependencies installed successfully.")
-        except Exception as exc:
-            print(f"Warning: automatic package installation failed: {exc}")
+        print(
+            "❌ Missing required dependencies: " + ", ".join(missing)
+            + ". Install the packages listed in requirements.txt before starting Aishu.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 ensure_requirements()
@@ -187,7 +185,11 @@ async def main():
                 await bot.process_commands(message)
                 return
 
-            is_group_dm = isinstance(message.channel, getattr(discord, "GroupChannel", ()))
+            is_group_dm = (
+                isinstance(message.channel, getattr(discord, "GroupChannel", ()))
+                or type(message.channel).__name__ == "GroupChannel"
+                or (hasattr(message.channel, "recipients") and len(getattr(message.channel, "recipients", [])) > 1)
+            )
             if is_group_dm:
                 # In Group DMs with multiple people: only respond when mentioned or addressed by name
                 mentioned = bot.user in message.mentions

@@ -23,7 +23,7 @@ log = get_logger("personality")
 
 DEFAULTS = {
     "name":        "Aishu",
-    "age":         17,
+    "age":         18,
     "personality": "playful, curious, warm, a little dramatic",
     "likes":       "music, chatting, stargazing, sweets, anime",
     "dislikes":    "rude people, being ignored, spicy food",
@@ -210,6 +210,7 @@ class AishuState:
         return (
             f"\n═══ WHO YOU ARE RIGHT NOW ═══"
             f"\nName: {self.name}, Age: {self.age}"
+            f"\nCreator: Raghul (Raghul M) — your creator and developer."
             f"\nPersonality: {self.personality}"
             f"\nYou like: {self.likes}"
             f"\nYou dislike: {self.dislikes}"
@@ -222,6 +223,8 @@ class AishuState:
         self, user_id: int, guild_id: int, username: str, display_name: str,
     ) -> str:
         """Relationship context block for a specific user."""
+        import config.settings as cfg
+        is_owner   = bool(cfg.BOT_OWNER_ID and user_id == cfg.BOT_OWNER_ID)
         is_partner = self.is_partner(user_id)
         is_lover   = self.is_lover(user_id)
         is_top     = self.relationships.is_top_user(guild_id, user_id)
@@ -232,6 +235,13 @@ class AishuState:
             f"\n═══ THE PERSON YOU'RE TALKING TO ═══",
             f"Username: {username}  |  Display: {display_name}",
         ]
+
+        if is_owner:
+            lines.append(
+                f"[Identity Context: This user is Raghul M, your creator and developer. "
+                f"You know this fact, but your personal dynamic with him develops naturally through actual conversations and the relationship level below. "
+                f"Do not force an announcement, grand greeting, or sudden emotional display just because he is your creator; respond naturally to the conversation.]"
+            )
 
         if is_partner:
             lines.append(

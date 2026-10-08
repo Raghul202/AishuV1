@@ -89,7 +89,7 @@ class BrainRouter:
                     l = self._user_locks.get(k)
                     if l and not l.locked():
                         self._user_locks.pop(k, None)
-            lock = self._user_locks[user_id] = asyncio.Lock()
+            lock = self._user_locks.setdefault(user_id, asyncio.Lock())
         async with lock:
             return await self._process_unlocked(*args, **kwargs)
 

@@ -9,6 +9,7 @@ Developer: !probe, !brain, !memorycheck, !modelstatus, !rankingsave
 """
 
 import asyncio
+from datetime import datetime, timezone
 import json
 
 import discord
@@ -538,6 +539,11 @@ class AdminCog(commands.Cog, name="Admin"):
         )
         embed.set_thumbnail(url=interaction.client.user.display_avatar.url)
         embed.add_field(
+            name  = "👑 Creator & Maker — Raghul M",
+            value = "her creator and bro who built her world, coded her mind, and brought her to life.",
+            inline= False,
+        )
+        embed.add_field(
             name  = "🤍 Big Brother — RavenAI",
             value = "calm, smart, and protective. aishu looks up to him even though she teases him constantly.",
             inline= False,
@@ -557,7 +563,7 @@ class AdminCog(commands.Cog, name="Admin"):
             value = "the internet — wherever there are people to talk to 🌸",
             inline= False,
         )
-        embed.set_footer(text="she mentions them sometimes naturally in conversation~")
+        embed.set_footer(text="she mentions them sometimes naturally in conversation • created by Raghul M~")
         await interaction.response.send_message(embed=embed)
 
     # /models
@@ -775,11 +781,7 @@ class AdminCog(commands.Cog, name="Admin"):
         await self.bot.change_presence(activity=discord.Game(name=text))
         await interaction.response.send_message(f"✅ Status: `{text}`", ephemeral=True)
 
-    # /stats
-    @app_commands.command(name="stats", description="Show runtime stats (Owner)")
-    async def stats(self, interaction: discord.Interaction):
-        if not _owner_only(interaction):
-            await interaction.response.send_message("owner only!", ephemeral=True); return
+    def _stats_embed(self) -> discord.Embed:
         status = brain_router.get_status()
         model_report = model_controller.get_status_report()[:5]
 
@@ -810,7 +812,14 @@ class AdminCog(commands.Cog, name="Admin"):
                 )
             embed.add_field(
                 name="Top Models (by rank)", value="\n".join(lines), inline=False)
+        return embed
 
+    # /stats
+    @app_commands.command(name="stats", description="Show runtime stats (Owner)")
+    async def stats(self, interaction: discord.Interaction):
+        if not _owner_only(interaction):
+            await interaction.response.send_message("owner only!", ephemeral=True); return
+        embed = self._stats_embed()
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # /adminreset — owner-only global wipe of ALL users' memory
@@ -1002,11 +1011,14 @@ class AdminCog(commands.Cog, name="Admin"):
 
     @commands.command(name="family")
     async def family_cmd(self, ctx: commands.Context):
-        """Learn about Aishu's family."""
+        """Learn about Aishu's family and creator."""
         embed = discord.Embed(
-            title="🌸 Aishu's Family",
+            title="🌸 Aishu's Family & Creator",
             description=(
-                "Aishu isn't just an AI — she has an older brother and sister!\n\n"
+                "Aishu isn't just an AI — she has a loving family and creator!\n\n"
+                "👑 **Raghul M** — Creator & Maker\n"
+                "• Her developer, creator, and bro who brought her to life\n"
+                "• Designed her mind, emotions, and memory\n\n"
                 "🦅 **RavenAI** — Older brother\n"
                 "• Calm, wise, and protective\n"
                 "• Focuses on reasoning, depth, and clarity\n\n"
@@ -1019,7 +1031,7 @@ class AdminCog(commands.Cog, name="Admin"):
             ),
             color=0xFFB7C5,
         )
-        embed.set_footer(text="Aishu ✿ • family lore")
+        embed.set_footer(text="Aishu ✿ • created by Raghul M • family lore")
         await ctx.send(embed=embed)
 
     @commands.command(name="models")

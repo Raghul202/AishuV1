@@ -52,11 +52,11 @@ class MemoryManager:
             if username: um.update_identity(username, display_name)
             return um
         if len(self._user_cache) > 800:
-            # Prune non-dirty cached entries to keep RAM bounded
+            # Prune cached entries to keep RAM bounded, flushing dirty ones first
             for uid in list(self._user_cache.keys())[:200]:
-                cached = self._user_cache.get(uid)
-                if cached and not cached._dirty:
-                    self._user_cache.pop(uid, None)
+                cached = self._user_cache.pop(uid, None)
+                if cached and cached._dirty:
+                    cached.flush()
         data = self.db.load_user(user_id) if self._memory_ok else None
         if not data: data = {"user_id": user_id, "username": username or str(user_id), "display_name": display_name or str(user_id)}
         um = UserMemory(user_id, data, storage=self.db)
