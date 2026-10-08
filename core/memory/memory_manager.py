@@ -81,6 +81,16 @@ class MemoryManager:
         text = " ".join(m["content"].lower() for m in um.get_stm_list() if m["role"] == "user")
         return [entry for entry in um.utm if sum(text.count(word) for word in entry.lower().split() if len(word) > 4) >= UTM_PROMOTION_HITS]
 
+    def list_users(self, limit: int = 50, search: str = "") -> list[dict]:
+        return self.db.list_users(limit=limit, search=search) if self._memory_ok else []
+
+    def delete_memory_fact(self, user_id: int, item_id: str = "", content: str = "") -> bool:
+        res = self.db.delete_memory_fact(user_id, item_id=item_id, content=content) if self._memory_ok else False
+        if user_id in self._user_cache:
+            # Refresh cached user memory if active in RAM
+            self._user_cache.pop(user_id, None)
+        return res
+
     def user_count(self) -> int: return self.db.user_count() if self._memory_ok else len(self._user_cache)
     def flush_all(self):
         for um in self._user_cache.values(): um.flush()

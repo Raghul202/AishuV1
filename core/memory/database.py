@@ -249,6 +249,44 @@ class AishuDatabase:
         with self._lock, self.connection() as db:
             db.execute("DELETE FROM users WHERE user_id=?", (user_id,))
 
+    def list_users(self, limit: int = 50, search: str = "") -> list[dict]:
+        with self._lock, self.connection() as db:
+            if search:
+                pattern = f"%{search}%"
+                rows = db.execute(
+                    """SELECT u.user_id, u.username, u.display_name, u.first_seen, u.last_seen,
+                              u.message_count, u.current_streak, u.longest_streak,
+                              COUNT(m.id) as memory_count
+                       FROM users u
+                       LEFT JOIN memories m ON u.user_id = m.user_id AND m.archived_at IS NULL
+                       WHERE u.username LIKE ? OR u.display_name LIKE ? OR CAST(u.user_id AS TEXT) LIKE ?
+                       GROUP BY u.user_id
+                       ORDER BY u.last_seen DESC LIMIT ?""",
+                    (pattern, pattern, pattern, limit),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    """SELECT u.user_id, u.username, u.display_name, u.first_seen, u.last_seen,
+                              u.message_count, u.current_streak, u.longest_streak,
+                              COUNT(m.id) as memory_count
+                       FROM users u
+                       LEFT JOIN memories m ON u.user_id = m.user_id AND m.archived_at IS NULL
+                       GROUP BY u.user_id
+                       ORDER BY u.last_seen DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_memory_fact(self, user_id: int, item_id: str = "", content: str = "") -> bool:
+        with self._lock, self.connection() as db:
+            if item_id:
+                cur = db.execute("DELETE FROM memories WHERE user_id=? AND id=?", (user_id, item_id))
+            elif content:
+                cur = db.execute("DELETE FROM memories WHERE user_id=? AND content=?", (user_id, content))
+            else:
+                return False
+            return cur.rowcount > 0
+
     def get_state(self, key: str, default=None):
         with self._lock:
             if key in self._state_cache:

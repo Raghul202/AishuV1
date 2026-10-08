@@ -54,6 +54,11 @@ DASHBOARD_PORT     = int(os.getenv("SERVER_PORT", os.getenv("PORT", os.getenv("D
 DASHBOARD_HOST     = os.getenv("DASHBOARD_HOST", "0.0.0.0")
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "aishu2026")
 
+# Discord OAuth2 settings for Dashboard Login
+DISCORD_CLIENT_ID     = os.getenv("DISCORD_CLIENT_ID", "1480053118510305432")
+DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
+DISCORD_REDIRECT_URI  = os.getenv("DISCORD_REDIRECT_URI", "https://aishu.apps.bot-hosting.cloud/auth/discord/callback")
+
 # ══════════════════════════════════════════════════════════════════
 #  BOT BEHAVIOUR
 # ══════════════════════════════════════════════════════════════════
