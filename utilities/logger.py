@@ -5,6 +5,7 @@ utilities/logger.py — Centralized logging with request-id trace support.
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -35,7 +36,13 @@ def get_logger(name: str) -> logging.Logger:
 
     try:
         os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
-        fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+        # Rotate at 2 MB, keep 3 backups — max ~8 MB total log disk usage.
+        fh = RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=2 * 1024 * 1024,  # 2 MB
+            backupCount=3,
+            encoding="utf-8",
+        )
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(fmt)
         logger.addHandler(fh)

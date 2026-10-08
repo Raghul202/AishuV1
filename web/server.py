@@ -967,7 +967,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 <div id="toast">✅ Action completed</div>
 
 <script>
-let authToken = localStorage.getItem('aishu_auth') || '';
+let authToken = '';
 let currentModels = [];
 let botData = {};
 let avatarDataUri = '';
@@ -997,7 +997,6 @@ function showTab(name) {
 
 async function api(path, opts = {}) {
   opts.headers = opts.headers || {};
-  if (authToken) opts.headers['Authorization'] = 'Bearer ' + authToken;
   opts.headers['Content-Type'] = 'application/json';
   try {
     const res = await fetch('/api/' + path, opts);
@@ -1020,9 +1019,7 @@ async function login() {
     body: JSON.stringify({password: pass})
   });
   if (res.ok) {
-    const data = await res.json();
-    authToken = data.token;
-    localStorage.setItem('aishu_auth', authToken);
+    await res.json();
     document.getElementById('authModal').style.display = 'none';
     document.getElementById('authError').style.display = 'none';
     loadAll();
@@ -1033,7 +1030,6 @@ async function login() {
 
 async function logout() {
   await api('auth/logout', {method: 'POST'});
-  localStorage.removeItem('aishu_auth');
   authToken = '';
   document.getElementById('authModal').style.display = 'flex';
 }
@@ -1503,7 +1499,83 @@ class DashboardServer:
         self.site: Optional[web.TCPSite] = None
         self._sessions: dict[str, dict] = {}       # token -> {user_id, auth_type, created_at, expires_at}
         self._oauth_states: dict[str, float] = {}   # state -> expires_at
+        # Rate-limiting: ip -> {"count": int, "window_start": float}
+        # Max _AUTH_MAX_ATTEMPTS failures per _AUTH_WINDOW_SECONDS before lockout.
+        self._login_attempts: dict[str, dict] = {}
         self._setup_routes()
+
+    _AUTH_MAX_ATTEMPTS   = 5      # max failures per window
+    _AUTH_WINDOW_SECONDS = 900.0  # 15 minutes
+
+    @staticmethod
+    def _is_trusted_proxy(request: web.Request) -> bool:
+        """Whether the direct peer may supply forwarding headers."""
+        try:
+            peer_ip = ipaddress.ip_address(request.remote or "")
+            return any(
+                peer_ip in ipaddress.ip_network(cidr, strict=False)
+                for cidr in cfg.DASHBOARD_TRUSTED_PROXY_CIDRS
+            )
+        except ValueError:
+            return False
+
+    @classmethod
+    def _get_client_ip(request: web.Request) -> str:
+        """Return the client's TCP-level peer address.
+
+        Forwarded client addresses are accepted only when the direct TCP peer
+        matches DASHBOARD_TRUSTED_PROXY_CIDRS; otherwise request.remote is used
+        so a client cannot forge X-Forwarded-For to bypass the login limit.
+        """
+        peer = request.remote or "unknown"
+        if not cls._is_trusted_proxy(request):
+            return peer
+        forwarded = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        try:
+            return str(ipaddress.ip_address(forwarded))
+        except ValueError:
+            return peer
+
+
+    @classmethod
+    def _request_is_secure(cls, request: web.Request) -> bool:
+        """Determine cookie transport security without trusting spoofed headers."""
+        return request.scheme == "https" or (
+            cls._is_trusted_proxy(request)
+            and request.headers.get("X-Forwarded-Proto", "").lower() == "https"
+        )
+    def _is_rate_limited(self, ip: str) -> bool:
+        """Return True if this IP has exceeded the failed-login threshold."""
+        now = time.time()
+        entry = self._login_attempts.get(ip)
+        if not entry:
+            return False
+        if now - entry["window_start"] > self._AUTH_WINDOW_SECONDS:
+            # Window expired — clear stale entry
+            self._login_attempts.pop(ip, None)
+            return False
+        return entry["count"] >= self._AUTH_MAX_ATTEMPTS
+
+    def _record_failed_attempt(self, ip: str) -> int:
+        """Increment failed-attempt counter for ip, returning new count."""
+        now = time.time()
+        entry = self._login_attempts.get(ip)
+        if not entry or now - entry["window_start"] > self._AUTH_WINDOW_SECONDS:
+            self._login_attempts[ip] = {"count": 1, "window_start": now}
+        else:
+            entry["count"] += 1
+        # Periodically prune stale entries to keep memory bounded
+        if len(self._login_attempts) > 500:
+            cutoff = now - self._AUTH_WINDOW_SECONDS
+            self._login_attempts = {
+                k: v for k, v in self._login_attempts.items()
+                if v["window_start"] > cutoff
+            }
+        return self._login_attempts[ip]["count"]
+
+    def _clear_failed_attempts(self, ip: str) -> None:
+        """Reset rate-limit counter after a successful login."""
+        self._login_attempts.pop(ip, None)
 
     def _create_session(self, user_id: int, auth_type: str) -> str:
         """Create a cryptographically secure dashboard session token."""
@@ -1536,9 +1608,6 @@ class DashboardServer:
         if session and session.get("expires_at", 0) > now:
             return True
 
-        # Fallback comparison for direct password authentication
-        if cfg.DASHBOARD_PASSWORD and hmac.compare_digest(token, cfg.DASHBOARD_PASSWORD):
-            return True
 
         return False
 
@@ -1664,8 +1733,8 @@ class DashboardServer:
         session_token = self._create_session(user_id=discord_user_id, auth_type="discord")
         log.info(f"Dashboard login via Discord OAuth successful for owner {discord_user_id}")
 
-        resp = web.HTTPFound(f"/?token={session_token}")
-        is_secure = request.scheme == "https" or request.headers.get("X-Forwarded-Proto") == "https"
+        resp = web.HTTPFound("/")
+        is_secure = self._request_is_secure(request)
         resp.set_cookie(
             "aishu_session",
             session_token,
@@ -1678,13 +1747,30 @@ class DashboardServer:
         return resp
 
     async def handle_auth(self, request: web.Request) -> web.Response:
+        ip = self._get_client_ip(request)
+
+        # ── Rate-limit check ────────────────────────────────────────────────────
+        if self._is_rate_limited(ip):
+            log.warning(
+                f"Dashboard auth blocked: too many failed attempts from {ip} "
+                f"(limit={self._AUTH_MAX_ATTEMPTS} per {int(self._AUTH_WINDOW_SECONDS // 60)} min)"
+            )
+            return web.json_response(
+                {"error": "Too many failed attempts. Try again later."},
+                status=429,
+            )
+
+        # ── Credential check ────────────────────────────────────────────────────
         try:
             data = await request.json()
             provided_pass = str(data.get("password", ""))
             if cfg.DASHBOARD_PASSWORD and hmac.compare_digest(provided_pass, cfg.DASHBOARD_PASSWORD):
+                # Success — reset counter, create session
+                self._clear_failed_attempts(ip)
                 session_token = self._create_session(user_id=cfg.BOT_OWNER_ID or 1, auth_type="password")
+                log.info(f"Dashboard password login successful from {ip}")
                 resp = web.json_response({"ok": True, "token": session_token})
-                is_secure = request.scheme == "https" or request.headers.get("X-Forwarded-Proto") == "https"
+                is_secure = self._request_is_secure(request)
                 resp.set_cookie(
                     "aishu_session",
                     session_token,
@@ -1697,6 +1783,14 @@ class DashboardServer:
                 return resp
         except Exception:
             pass
+
+        # ── Failed attempt ───────────────────────────────────────────────────────
+        attempt_count = self._record_failed_attempt(ip)
+        remaining = max(0, self._AUTH_MAX_ATTEMPTS - attempt_count)
+        log.warning(
+            f"Dashboard auth failed: invalid password from {ip} "
+            f"(attempt {attempt_count}/{self._AUTH_MAX_ATTEMPTS}, {remaining} remaining)"
+        )
         return web.json_response({"error": "Invalid password"}, status=401)
 
     async def handle_logout(self, request: web.Request) -> web.Response:
@@ -1980,14 +2074,19 @@ class DashboardServer:
         messages = prompt_engine.build_messages(prompt, um.get_stm_list()[-6:], message)
 
         t0 = time.perf_counter()
-        resp = await asyncio.to_thread(model_controller.chat, messages, 350, 0.85)
+        reply_text, model_used, _api_latency_ms, failure = await asyncio.to_thread(
+            model_controller.get_reply, messages
+        )
         duration_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+        if not reply_text:
+            return web.json_response({"error": f"No model replied: {failure or 'unknown failure'}"}, status=503)
 
         return web.json_response({
             "ok": True,
-            "reply": resp.text if resp else "no response",
-            "model": resp.model if resp else "unknown",
-            "provider": resp.provider if resp else "unknown",
+            "reply": reply_text,
+            "model": model_used or "unknown",
+            "provider": model_used.split("/")[0] if model_used and "/" in model_used else (model_used or "unknown"),
             "latency_ms": duration_ms,
             "estimated_tokens": ctx.estimated_tokens,
         })
@@ -2077,8 +2176,20 @@ class DashboardServer:
         if likes is not None: aishu_state.set("likes", likes.strip())
         if dislikes is not None: aishu_state.set("dislikes", dislikes.strip())
         if custom_note is not None: aishu_state.set("custom_note", custom_note.strip())
-        if lover is not None: aishu_state.set_lover(lover.strip() or None)
-        if partner is not None: aishu_state.set_partner(partner.strip() or None)
+        if lover is not None:
+            lover_name = lover.strip()
+            if not lover_name:
+                aishu_state.clear_lover()
+            else:
+                # Preserve existing lover_id if set; only update the display name from dashboard
+                aishu_state.set("lover_name", lover_name)
+        if partner is not None:
+            partner_name = partner.strip()
+            if not partner_name:
+                aishu_state.clear_partner()
+            else:
+                # Preserve existing partner_id if set; only update the display name from dashboard
+                aishu_state.set("partner_name", partner_name)
         aishu_state.save(force=True)
         return web.json_response({"ok": True})
 

@@ -11,10 +11,16 @@ Slash:  /chat, /memories, /forget, /clear, /profile, /leaderboard,
 """
 
 import asyncio
+import ipaddress
+import socket
+from urllib.parse import urlparse
+
+import aiohttp
 import io
 import json
 import random
 import time
+from aiohttp.abc import AbstractResolver
 import platform
 from datetime import datetime, timezone
 
@@ -36,6 +42,46 @@ from utilities.logger import get_logger
 log = get_logger("commands.chat")
 
 MEDALS = ["🥇", "🥈", "🥉"]
+
+
+class _PublicAddressResolver(AbstractResolver):
+    """Resolve image hosts only to public addresses, including IPv6."""
+    def __init__(self):
+        self._resolver = aiohttp.resolver.DefaultResolver()
+
+    async def resolve(self, host, port=0, family=socket.AF_UNSPEC):
+        addresses = await self._resolver.resolve(host, port, family)
+        if not addresses or any(not ipaddress.ip_address(item["host"]).is_global for item in addresses):
+            raise OSError("image host resolves to a non-public address")
+        return addresses
+
+    async def close(self):
+        await self._resolver.close()
+
+
+async def _fetch_public_image(url: str) -> tuple[bytes | None, str | None]:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None, None
+    try:
+        if not ipaddress.ip_address(parsed.hostname).is_global:
+            return None, None
+    except ValueError:
+        pass
+    timeout = aiohttp.ClientTimeout(total=10)
+    connector = aiohttp.TCPConnector(resolver=_PublicAddressResolver(), use_dns_cache=False)
+    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+        async with session.get(url, allow_redirects=False) as response:
+            if response.status != 200 or not response.content_type.startswith("image/"):
+                return None, None
+            if response.content_length is not None and response.content_length > cfg.MAX_IMAGE_INPUT_BYTES:
+                return None, None
+            image = bytearray()
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                image.extend(chunk)
+                if len(image) > cfg.MAX_IMAGE_INPUT_BYTES:
+                    return None, None
+            return bytes(image), response.content_type
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -1149,6 +1195,9 @@ class ChatCog(commands.Cog, name="Chat"):
             await interaction.response.send_message("slow down a sec~", ephemeral=True)
             return
         await interaction.response.defer()
+        if image.size > cfg.MAX_IMAGE_INPUT_BYTES:
+            await interaction.followup.send("that image is too large to inspect safely 😔", ephemeral=True)
+            return
         try:
             image_bytes = await image.read()
             mime_type = image.content_type or "image/png"
@@ -1273,7 +1322,7 @@ class ChatCog(commands.Cog, name="Chat"):
 
         if ctx.message.attachments:
             att = ctx.message.attachments[0]
-            if att.content_type and att.content_type.startswith("image/"):
+            if att.size <= cfg.MAX_IMAGE_INPUT_BYTES and att.content_type and att.content_type.startswith("image/"):
                 image_bytes = await att.read()
                 mime_type = att.content_type
                 filename = att.filename
@@ -1281,7 +1330,7 @@ class ChatCog(commands.Cog, name="Chat"):
             ref_msg = ctx.message.reference.resolved
             if hasattr(ref_msg, "attachments") and ref_msg.attachments:
                 att = ref_msg.attachments[0]
-                if att.content_type and att.content_type.startswith("image/"):
+                if att.size <= cfg.MAX_IMAGE_INPUT_BYTES and att.content_type and att.content_type.startswith("image/"):
                     image_bytes = await att.read()
                     mime_type = att.content_type
                     filename = att.filename
@@ -1291,33 +1340,7 @@ class ChatCog(commands.Cog, name="Chat"):
             for w in words:
                 if w.startswith("http://") or w.startswith("https://"):
                     try:
-                        import ipaddress
-                        import socket
-                        from urllib.parse import urlparse
-                        import requests
-                        parsed = urlparse(w)
-                        if parsed.scheme not in ("http", "https"):
-                            continue
-                        hostname = parsed.hostname or ""
-                        if not hostname or hostname.lower() in ("localhost", "127.0.0.1", "::1") or hostname.endswith(".local"):
-                            continue
-                        ip_str = socket.gethostbyname(hostname)
-                        ip_obj = ipaddress.ip_address(ip_str)
-                        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_reserved:
-                            continue
-
-                        def _fetch():
-                            with requests.get(w, timeout=10, stream=True, allow_redirects=False) as r:
-                                if r.status_code == 200 and r.headers.get("content-type", "").startswith("image/"):
-                                    data = b""
-                                    for chunk in r.iter_content(chunk_size=65536):
-                                        data += chunk
-                                        if len(data) > 10 * 1024 * 1024:
-                                            return None, None
-                                    return data, r.headers.get("content-type", "image/png")
-                                return None, None
-
-                        fetched_bytes, fetched_mime = await asyncio.to_thread(_fetch)
+                        fetched_bytes, fetched_mime = await _fetch_public_image(w)
                         if fetched_bytes:
                             image_bytes = fetched_bytes
                             mime_type = fetched_mime

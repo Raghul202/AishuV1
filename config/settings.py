@@ -49,10 +49,16 @@ BOT_OWNER_ID     = int(os.getenv("BOT_OWNER_ID", "0"))
 #  DASHBOARD SETTINGS
 # ══════════════════════════════════════════════════════════════════
 
-DASHBOARD_ENABLED  = os.getenv("DASHBOARD_ENABLED", "true").lower() in ("true", "1", "yes")
+DASHBOARD_ENABLED  = os.getenv("DASHBOARD_ENABLED", "false").lower() in ("true", "1", "yes")
 DASHBOARD_PORT     = int(os.getenv("SERVER_PORT", os.getenv("PORT", os.getenv("DASHBOARD_PORT", os.getenv("APP_PORT", "8080")))))
-DASHBOARD_HOST     = os.getenv("DASHBOARD_HOST", "0.0.0.0")
-DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "aishu2026")
+DASHBOARD_HOST     = os.getenv("DASHBOARD_HOST", "127.0.0.1")
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+# Comma-separated proxy IPs/CIDRs allowed to supply X-Forwarded-For. Leave
+# empty unless the dashboard sits behind a proxy you control.
+DASHBOARD_TRUSTED_PROXY_CIDRS = tuple(
+    value.strip() for value in os.getenv("DASHBOARD_TRUSTED_PROXY_CIDRS", "").split(",")
+    if value.strip()
+)
 
 # Discord OAuth2 settings for Dashboard Login
 DISCORD_CLIENT_ID     = os.getenv("DISCORD_CLIENT_ID", "1480053118510305432")
@@ -84,6 +90,10 @@ RL_WINDOW        = 10.0         # window in seconds
 AI_MAX_TOKENS    = 300
 AI_TEMPERATURE   = 0.85
 AI_TIMEOUT       = 20           # seconds per model request
+AI_REPLY_DEADLINE = 15.0         # total seconds allowed across fallback models
+
+MAX_IMAGE_INPUT_BYTES = 8 * 1024 * 1024
+# Keep image handling below the process memory budget even after base64 encoding.
 
 # OpenRouter API headers
 OPENROUTER_HEADERS = {
@@ -167,6 +177,9 @@ MEMORY_SAVE_INTERVAL = 60.0     # seconds between lazy saves (0 = always save)
 
 DATA_DIR            = os.getenv("AISHU_DATA_DIR", "data")
 DATABASE_FILE       = os.path.join(DATA_DIR, "aishu.db")
+# SQLite writes are refused before the 512 MB deployment disk budget is reached.
+DATABASE_MAX_BYTES   = 480 * 1024 * 1024
+DATABASE_PRUNE_AT_BYTES = 440 * 1024 * 1024
 USERS_DIR           = os.path.join(DATA_DIR, "users")
 SERVER_DIR          = os.path.join(DATA_DIR, "server")
 GUILDS_DIR          = os.path.join(DATA_DIR, "guilds")
@@ -210,6 +223,11 @@ def validate_config() -> list:
         errors.append("No text AI provider key is set (configure NVIDIA, Groq, Gemini, OpenRouter, or Cloudflare)")
     if BOT_OWNER_ID == 0:
         errors.append("BOT_OWNER_ID is 0 — set your Discord user ID for owner commands")
+    if DASHBOARD_ENABLED:
+        if len(DASHBOARD_PASSWORD) < 32:
+            errors.append("DASHBOARD_PASSWORD must be at least 32 characters when the dashboard is enabled")
+        if DASHBOARD_PASSWORD == "aishu2026":
+            errors.append("DASHBOARD_PASSWORD must not use the old default value")
     return errors
 
 

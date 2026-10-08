@@ -8,6 +8,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from config.settings import DATABASE_MAX_BYTES, DATABASE_PRUNE_AT_BYTES
+
 
 SCHEMA_VERSION = 3
 
@@ -98,6 +100,18 @@ class AishuDatabase:
             db.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user_scope_created ON conversations(user_id, scope, created_at DESC)")
             db.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (?)", (SCHEMA_VERSION,))
 
+    def _ensure_storage_budget(self) -> None:
+        """Refuse new writes before SQLite can exceed the deployment disk budget."""
+        used = sum(
+            candidate.stat().st_size for candidate in
+            (self.path, self.path.with_name(self.path.name + "-wal"), self.path.with_name(self.path.name + "-shm"))
+            if candidate.exists()
+        )
+        if used >= DATABASE_PRUNE_AT_BYTES:
+            raise RuntimeError(
+                f"SQLite storage guard active ({used} bytes; limit {DATABASE_MAX_BYTES} bytes)"
+            )
+
     def load_user(self, user_id: int) -> dict | None:
         with self._lock, self.connection() as db:
             user = db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
@@ -124,6 +138,7 @@ class AishuDatabase:
     def save_user(self, data: dict) -> None:
         def key(value: str) -> str:
             return " ".join(value.lower().split())[:240]
+        self._ensure_storage_budget()
         with self._lock, self.connection() as db:
             db.execute("""INSERT INTO users(user_id,username,display_name,first_seen,last_seen,message_count,current_streak,longest_streak,last_streak_date,roleplay_json)
                 VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,last_seen=excluded.last_seen,message_count=excluded.message_count,current_streak=excluded.current_streak,longest_streak=excluded.longest_streak,last_streak_date=excluded.last_streak_date,roleplay_json=excluded.roleplay_json""",

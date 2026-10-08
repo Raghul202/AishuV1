@@ -28,7 +28,7 @@ import requests
 
 from config.settings import (
     FREE_MODELS, OPENROUTER_KEY, OPENROUTER_HEADERS, AI_MAX_TOKENS,
-    AI_TIMEOUT, AI_TEMPERATURE, DATABASE_FILE,
+    AI_TIMEOUT, AI_TEMPERATURE, AI_REPLY_DEADLINE, DATABASE_FILE,
     HF_PARTNER_MODELS, HF_API_KEY,
     GEMINI_API_KEY, GEMINI_MODELS,
     GROQ_API_KEY, GROQ_MODELS,
@@ -174,6 +174,25 @@ class ModelController:
             self._local.gem_session = self._create_pooled_session()
         return self._local.gem_session
 
+    def _begin_reply_deadline(self) -> bool:
+        if getattr(self._local, "reply_deadline", None) is not None:
+            return False
+        self._local.reply_deadline = time.monotonic() + AI_REPLY_DEADLINE
+        return True
+
+    def _end_reply_deadline(self, owner: bool) -> None:
+        if owner and hasattr(self._local, "reply_deadline"):
+            del self._local.reply_deadline
+
+    def _has_reply_time(self) -> bool:
+        deadline = getattr(self._local, "reply_deadline", None)
+        return deadline is None or time.monotonic() < deadline
+
+    def _request_timeout(self, default: float) -> float:
+        deadline = getattr(self._local, "reply_deadline", None)
+        if deadline is None:
+            return default
+        return max(0.1, min(default, deadline - time.monotonic()))
     # ─── Persistent rankings ───────────────────────────────────────────────────
 
     def _load_rankings(self):
@@ -315,6 +334,7 @@ class ModelController:
         return "chat"
 
     def _call_nim_model(self, model: str, messages: list) -> Optional[str]:
+        if not self._has_reply_time(): return None
         if not NVIDIA_API_KEY:
             return None
         key, rec, start = _NIM_PREFIX + model, self._get_record(_NIM_PREFIX + model), time.monotonic()
@@ -324,7 +344,7 @@ class ModelController:
             response = self._get_nim_session().post(
                 "https://integrate.api.nvidia.com/v1/chat/completions",
                 json={"model": model, "messages": messages, "max_tokens": AI_MAX_TOKENS, "temperature": AI_TEMPERATURE},
-                timeout=CHAT_MODEL_TIMEOUT,
+                timeout=self._request_timeout(CHAT_MODEL_TIMEOUT),
             )
             if response.status_code == 429:
                 self._set_cooldown(key, COOLDOWN_429_SECONDS)
@@ -360,6 +380,7 @@ class ModelController:
     ) -> Optional[str]:
         """Call one OpenRouter model. Returns reply text or None."""
         rec   = self._get_record(model)
+        if not self._has_reply_time(): return None
         start = time.monotonic()
         short = model.split("/")[-1][:35]
 
@@ -375,7 +396,7 @@ class ModelController:
                     "max_tokens":  AI_MAX_TOKENS,
                     "temperature": AI_TEMPERATURE,
                 },
-                timeout=timeout,
+                timeout=self._request_timeout(timeout),
             )
 
             if response.status_code == 429:
@@ -439,6 +460,7 @@ class ModelController:
             return None
 
     def _call_groq_model(self, model: str, messages: list) -> Optional[str]:
+        if not self._has_reply_time(): return None
         """Call one Groq model (OpenAI-compatible). Returns reply text or None."""
         if not GROQ_API_KEY:
             return None
@@ -464,7 +486,7 @@ class ModelController:
                     "max_tokens":  AI_MAX_TOKENS,
                     "temperature": AI_TEMPERATURE,
                 },
-                timeout=CHAT_MODEL_TIMEOUT,
+                timeout=self._request_timeout(CHAT_MODEL_TIMEOUT),
             )
 
             if response.status_code == 429:
@@ -510,6 +532,7 @@ class ModelController:
             return None
 
     def _call_cf_model(self, model: str, messages: list) -> Optional[str]:
+        if not self._has_reply_time(): return None
         """Call one Cloudflare Workers AI model. Returns reply text or None."""
         if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN:
             return None
@@ -531,7 +554,7 @@ class ModelController:
                     "max_tokens":  AI_MAX_TOKENS,
                     "temperature": AI_TEMPERATURE,
                 },
-                timeout=CHAT_MODEL_TIMEOUT,
+                timeout=self._request_timeout(CHAT_MODEL_TIMEOUT),
             )
 
             if response.status_code == 429:
@@ -580,6 +603,7 @@ class ModelController:
             return None
 
     def _call_gemini_model(self, model: str, messages: list) -> Optional[str]:
+        if not self._has_reply_time(): return None
         """
         Call one Gemini model via the REST API (no SDK dependency).
         Converts OpenAI-style messages to Gemini format.
@@ -633,7 +657,7 @@ class ModelController:
                         "temperature":     AI_TEMPERATURE,
                     },
                 },
-                timeout=CHAT_MODEL_TIMEOUT,
+                timeout=self._request_timeout(CHAT_MODEL_TIMEOUT),
             )
 
             if response.status_code == 429:
@@ -681,6 +705,7 @@ class ModelController:
     # ─── HuggingFace (partner route only) ─────────────────────────────────────
 
     def _call_hf_model(self, model: str, messages: list) -> Optional[str]:
+        if not self._has_reply_time(): return None
         """Call a HuggingFace model via the Inference API."""
         start = time.monotonic()
         short = model.split("/")[-1][:25]
@@ -694,7 +719,7 @@ class ModelController:
                     "temperature": AI_TEMPERATURE,
                     "stream":      False,
                 },
-                timeout=AI_TIMEOUT + 10,
+                timeout=self._request_timeout(AI_TIMEOUT + 10),
             )
             if response.status_code == 429:
                 log.warning(f"✗ [HF:{short}] 429 rate-limited")
@@ -729,6 +754,14 @@ class ModelController:
     # ─── Main entry points ─────────────────────────────────────────────────────
 
     def get_reply(self, messages: list) -> tuple:
+        """Route a reply within one bounded, end-to-end provider deadline."""
+        owner = self._begin_reply_deadline()
+        try:
+            return self._get_reply(messages)
+        finally:
+            self._end_reply_deadline(owner)
+
+    def _get_reply(self, messages: list) -> tuple:
         """
         Try all providers in order until one responds.
 
@@ -827,6 +860,14 @@ class ModelController:
         return self._call_model(key, messages)
 
     def get_reply_partner(self, messages: list) -> tuple:
+        """Partner routing with the same bounded end-to-end deadline."""
+        owner = self._begin_reply_deadline()
+        try:
+            return self._get_reply_partner(messages)
+        finally:
+            self._end_reply_deadline(owner)
+
+    def _get_reply_partner(self, messages: list) -> tuple:
         """
         Partner-tier route: HuggingFace uncensored models first,
         then falls back to get_reply() across all providers.
