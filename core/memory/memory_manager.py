@@ -66,20 +66,50 @@ class MemoryManager:
 
     def get(self, user_id: int) -> Optional[UserMemory]: return self._user_cache.get(user_id)
     def is_memory_available(self) -> bool: return self._memory_ok
+    def is_memory_enabled(self) -> bool:
+        return bool(
+            self._memory_ok
+            and self.db.get_state("feature_memory_enabled", True)
+        )
 
-    def record_conversation(self, user_id, username, display_name, user_text, ai_reply):
+    def record_conversation(self, user_id, username, display_name, user_text, ai_reply,
+                            conversation_scope: str = "normal",
+                            visibility: str = "private",
+                            extract_memory: bool = True):
         um = self.load(user_id, username, display_name)
-        um.touch(); um.update_streak(); um.push_stm("user", user_text); um.push_stm("assistant", ai_reply); um.extract_and_store(user_text); um.save()
+        um.touch()
+        um.update_streak()
+        um.push_stm("user", user_text, scope=conversation_scope)
+        um.push_stm("assistant", ai_reply, scope=conversation_scope)
+        if extract_memory:
+            um.extract_and_store(user_text, visibility=visibility)
+        um.save()
 
     def record_conversation_partner(self, user_id, username, display_name, user_text, ai_reply):
         um = self.load(user_id, username, display_name)
-        um.touch(); um.update_streak(); um.push_stm("user", user_text); um.push_stm("assistant", ai_reply); um.push_partner_stm("user", user_text); um.push_partner_stm("assistant", ai_reply); um.extract_and_store(user_text); um.extract_and_store_partner(user_text); um.save()
+        um.touch()
+        um.update_streak()
+        um.push_partner_stm("user", user_text)
+        um.push_partner_stm("assistant", ai_reply)
+        um.extract_and_store_partner(user_text)
+        um.save()
 
-    def detect_promotion_candidates(self, user_id: int) -> list:
+    def detect_promotion_candidates(self, user_id: int,
+                                    conversation_scope: str = "public",
+                                    include_private: bool = False) -> list:
         um = self.get(user_id)
         if not um: return []
-        text = " ".join(m["content"].lower() for m in um.get_stm_list() if m["role"] == "user")
-        return [entry for entry in um.utm if sum(text.count(word) for word in entry.lower().split() if len(word) > 4) >= UTM_PROMOTION_HITS]
+        text = " ".join(
+            m["content"].lower()
+            for m in um.get_stm_list(conversation_scope)
+            if m["role"] == "user"
+        )
+        candidates = um.get_utm_for_context(include_private)
+        return [
+            entry for entry in candidates
+            if sum(text.count(word) for word in entry.lower().split() if len(word) > 4)
+            >= UTM_PROMOTION_HITS
+        ]
 
     def list_users(self, limit: int = 50, search: str = "") -> list[dict]:
         return self.db.list_users(limit=limit, search=search) if self._memory_ok else []

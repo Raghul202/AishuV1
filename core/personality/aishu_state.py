@@ -66,6 +66,11 @@ class AishuState:
             if k not in self._data:
                 self._data[k] = copy.deepcopy(v)
                 missing = True
+        age = self._data.get("age")
+        if not isinstance(age, int) or isinstance(age, bool) or age < 18:
+            log.warning("Invalid or underage Aishu identity age; enforcing adult minimum")
+            self._data["age"] = 18
+            missing = True
         # Subsystems must be reconstructed before any possible persistence.  In
         # particular, never serialize fresh defaults over saved relationships.
         self.mood = MoodSystem.from_dict(self._data.get("mood_data", {}))
@@ -221,15 +226,19 @@ class AishuState:
 
     def build_user_relationship_block(
         self, user_id: int, guild_id: int, username: str, display_name: str,
+        private_partner_dm: bool = False,
+        relationship_allowed: bool = True,
     ) -> str:
         """Relationship context block for a specific user."""
         import config.settings as cfg
         is_owner   = bool(cfg.BOT_OWNER_ID and user_id == cfg.BOT_OWNER_ID)
-        is_partner = self.is_partner(user_id)
-        is_lover   = self.is_lover(user_id)
-        is_top     = self.relationships.is_top_user(guild_id, user_id)
-        rel_desc   = self.relationships.describe_relationship(guild_id, user_id)
-        rs         = self.relationships.get_state(guild_id, user_id)
+        is_partner = self.is_partner(user_id) and private_partner_dm
+        is_lover   = relationship_allowed and self.is_lover(user_id)
+        is_top     = relationship_allowed and self.relationships.is_top_user(guild_id, user_id)
+        rel_desc   = self.relationships.describe_relationship(
+            guild_id, user_id, private_partner_dm=private_partner_dm
+        ) if relationship_allowed else ""
+        rs         = self.relationships.get_state(guild_id, user_id) if relationship_allowed else None
 
         lines = [
             f"\n═══ THE PERSON YOU'RE TALKING TO ═══",

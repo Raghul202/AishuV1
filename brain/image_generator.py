@@ -53,7 +53,7 @@ class ImageGenerator:
             try:
                 response = requests.post(
                     f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/{model}",
-                    headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
+                    headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}" if CLOUDFLARE_API_TOKEN else "Bearer "},
                     # Current Cloudflare schema for this route accepts prompt and
                     # steps; it rejects the formerly documented `seed` field.
                     json={"prompt": prompt, "steps": 4},
@@ -78,7 +78,7 @@ class ImageGenerator:
         try:
             response = requests.post(
                 "https://api.edenai.run/v3/universal-ai",
-                headers={"Authorization": f"Bearer {EDENAI_API_KEY}"},
+                headers={"Authorization": f"Bearer {EDENAI_API_KEY}" if EDENAI_API_KEY else "Bearer "},
                 json={
                     "model": "image/generation/stabilityai/stable-diffusion-xl-1024-v1-0",
                     "input": {"text": prompt, "resolution": "1024x1024", "num_images": 1},
@@ -133,7 +133,7 @@ class ImageGenerator:
                                 "role": "user",
                                 "parts": [
                                     {"inline_data": {"mime_type": mime_type, "data": b64_data}},
-                                    {"text": f"You are Aishu (17, playful, sweet, real girl). Respond naturally, casually, lowercase: {p}"},
+                                    {"text": f"You are Aishu (18, an adult, playful, sweet, real girl). Respond naturally, casually, lowercase: {p}"},
                                 ],
                             }],
                             "generationConfig": {

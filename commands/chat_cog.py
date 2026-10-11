@@ -35,7 +35,9 @@ from core.afk_manager import afk_manager
 from core.memory.memory_manager import memory_manager
 from core.personality.aishu_state import aishu_state
 from core.schemas import FAIL_RATE_LIMITED, get_failure_message
-from utilities.helpers import relationship_label, is_preference, get_theme_color
+from utilities.helpers import (
+    relationship_label, is_preference, get_theme_color, is_one_to_one_dm,
+)
 from utilities.ratelimit import limiter
 from utilities.logger import get_logger
 
@@ -135,7 +137,7 @@ async def do_reply(
         text         = text,
         guild_id     = guild_id,
         channel_id   = message.channel.id,
-        is_dm        = is_dm,
+        is_dm        = is_one_to_one_dm(message.channel, message.guild) if is_dm else False,
         is_mention   = is_mention,
         guild_config = guild_config,
     )
@@ -158,17 +160,45 @@ async def do_reply(
     async with message.channel.typing():
         await asyncio.sleep(delay)
 
+    # Resolve reply target: if user replied to another message, reply natively to the original message
+    reply_target = message
+    if message.reference and message.reference.message_id:
+        resolved = getattr(message.reference, "resolved", None)
+        if isinstance(resolved, discord.Message):
+            reply_target = resolved
+        elif hasattr(message.channel, "fetch_message"):
+            try:
+                reply_target = await message.channel.fetch_message(message.reference.message_id)
+            except Exception:
+                reply_target = message
+
+    # Allowed mentions: allow user mentions when explicitly generated, forbid @everyone / @here / roles
+    allowed = discord.AllowedMentions(everyone=False, roles=False, users=True, replied_user=False)
+
     for i, chunk in enumerate(result.chunks):
         if i == 0:
-            await message.reply(chunk, mention_author=False)
+            try:
+                await reply_target.reply(chunk, mention_author=False, allowed_mentions=allowed)
+            except (discord.HTTPException, discord.Forbidden):
+                # If native reply fails (e.g. deleted message, permission issue, or user-install channel restrictions), fallback to channel.send or message.channel
+                try:
+                    await message.channel.send(chunk, allowed_mentions=allowed)
+                except Exception as e:
+                    log.warning(f"Could not deliver reply chunk 0: {e}")
         else:
             await asyncio.sleep(random.uniform(0.3, 0.7))
-            await message.channel.send(chunk)
+            try:
+                await message.channel.send(chunk, allowed_mentions=allowed)
+            except Exception as e:
+                log.warning(f"Could not deliver reply chunk {i}: {e}")
 
 
 # ─── Embed builders ───────────────────────────────────────────────────────────
 
-def _memories_embed(user: discord.User | discord.Member, um) -> discord.Embed:
+def _memories_embed(
+    user: discord.User | discord.Member, um,
+    include_private_memory: bool = False,
+) -> discord.Embed:
     embed = discord.Embed(
         title = f"what i remember about {um.display_name} 🌸",
         color = get_theme_color(),
@@ -180,8 +210,18 @@ def _memories_embed(user: discord.User | discord.Member, um) -> discord.Embed:
     embed.add_field(name="Known since", value=um.first_seen[:10],     inline=True)
     embed.add_field(name="Last seen",   value=um.last_seen[:10],      inline=True)
 
-    if um.ltm_facts:
-        items = um._ltm_facts[-8:]
+    visible = lambda items: (
+        um.ordinary_memory_items(items) if include_private_memory else [
+            item for item in um.ordinary_memory_items(items)
+            if "visibility:public" in item.tags
+            and "visibility:private" not in item.tags
+        ]
+    )
+    facts = visible(um._ltm_facts)
+    prefs = visible(um._ltm_prefs)
+    topics = visible(um._ltm_topics)
+    if facts:
+        items = facts[-8:]
         embed.add_field(
             name  = "📌 facts",
             value = "\n".join(
@@ -191,21 +231,21 @@ def _memories_embed(user: discord.User | discord.Member, um) -> discord.Embed:
             ),
             inline= False,
         )
-    if um.ltm_prefs:
-        items = um._ltm_prefs[-6:]
+    if prefs:
+        items = prefs[-6:]
         embed.add_field(
             name  = "❤️ preferences",
             value = "\n".join(f"• {m.content[:80]}" for m in reversed(items)),
             inline= False,
         )
-    if um.ltm_topics:
-        items = um._ltm_topics[-4:]
+    if topics:
+        items = topics[-4:]
         embed.add_field(
             name  = "💬 topics",
             value = "\n".join(f"• {m.content[:80]}" for m in reversed(items)),
             inline= False,
         )
-    if not um.has_long_term_memory():
+    if not (facts or prefs or topics):
         embed.description = "i only know your name so far! keep chatting 🌸"
 
     embed.set_footer(text="!forget <topic>  •  !clear to wipe your memory  •  !export to download")
@@ -233,8 +273,11 @@ def _leaderboard_embed(guild: discord.Guild, bot: commands.Bot) -> discord.Embed
         member = guild.get_member(uid)
         name   = member.display_name if member else uname
         mention= member.mention if member else f"`{uname}`"
-        extra  = " 💞 *(life partner)*" if aishu_state.is_partner(uid) else (" 💕 *(special person)*" if aishu_state.is_lover(uid) else "")
-        tier   = relationship_label(score)
+        extra  = (
+            " 💕 *(special person)*"
+            if aishu_state.is_lover(uid) and not aishu_state.is_partner(uid) else ""
+        )
+        tier   = _relationship_label(score, private_partner_dm=False)
         embed.add_field(
             name  = f"{medal}  {name}{extra}",
             value = f"{mention} — **{score:.0f} pts** • {tier}",
@@ -292,12 +335,17 @@ def _streak_embed(user: discord.User | discord.Member, um) -> discord.Embed:
 def _profile_embed(
     member: discord.Member | discord.User,
     um, guild_id: int, bot: commands.Bot,
+    include_user_memory: bool = False,
+    include_private_memory: bool = False,
+    private_partner_dm: bool = False,
 ) -> discord.Embed:
     score = aishu_state.relationships.get_score(guild_id, member.id)
     lb    = aishu_state.relationships.get_leaderboard(guild_id, 100)
     rank  = next((i + 1 for i, (uid, _, _) in enumerate(lb) if uid == member.id), None)
-    tier  = relationship_label(score)
+    tier  = _relationship_label(score, private_partner_dm)
     rs    = aishu_state.relationships.get_state(guild_id, member.id)
+    if aishu_state.is_partner(member.id) and not private_partner_dm:
+        rs = None
 
     embed = discord.Embed(title=f"{member.display_name}'s Profile", color=0xFF69B4)
     embed.set_thumbnail(url=member.display_avatar.url)
@@ -305,10 +353,14 @@ def _profile_embed(
     embed.add_field(name="Messages",     value=str(um.message_count),   inline=True)
     embed.add_field(name="Known since",  value=um.first_seen[:10],      inline=True)
     embed.add_field(name="Server Rank",  value=f"#{rank}" if rank else "unranked", inline=True)
-    embed.add_field(name="Bond Score",   value=f"{score:.0f} pts",      inline=True)
+    embed.add_field(
+        name="Bond Score",
+        value=f"{_relationship_score(member.id, score, private_partner_dm):.0f} pts",
+        inline=True,
+    )
     embed.add_field(name="Relationship", value=tier,                    inline=True)
 
-    if rs:
+    if rs and (not aishu_state.is_partner(member.id) or private_partner_dm):
         embed.add_field(
             name  = "📊 Bond Details",
             value = (
@@ -320,12 +372,21 @@ def _profile_embed(
             inline= False,
         )
 
-    if aishu_state.is_partner(member.id):
+    if aishu_state.is_partner(member.id) and private_partner_dm:
         embed.add_field(name="💞 Partner", value="Aishu's life partner — the deepest bond!", inline=False)
-    elif aishu_state.is_lover(member.id):
+    elif aishu_state.is_lover(member.id) and not aishu_state.is_partner(member.id):
         embed.add_field(name="💕 Special", value="Aishu's special person!", inline=False)
 
-    recent = (um.ltm_facts + um.ltm_prefs)[-4:]
+    recent = []
+    if include_user_memory:
+        memories = um.ordinary_memory_items(um._ltm_facts + um._ltm_prefs)
+        if not include_private_memory:
+            memories = [
+                item for item in memories
+                if "visibility:public" in item.tags
+                and "visibility:private" not in item.tags
+            ]
+        recent = [item.content for item in memories[-4:]]
     if recent:
         embed.add_field(
             name  = "Aishu remembers",
@@ -338,7 +399,11 @@ def _profile_embed(
 def _remember_embed(user_name: str, fact: str, category: str) -> discord.Embed:
     embed = discord.Embed(
         title="🌸 Held in My Heart",
-        description=f"i'll remember that for you, **{user_name}** ✨\n\n> *\"{fact}\"*",
+        description=(
+            f"i'll remember that for you, **{user_name}** ✨\n"
+            "this fact is available for relevant conversation context across your chats. "
+            "private conversation transcripts and partner-only memories stay separate."
+        ),
         color=get_theme_color(),
     )
     embed.add_field(name="Category", value=f"`{category}`", inline=True)
@@ -368,10 +433,48 @@ def _memory_search_embed(user_name: str, query: str, results: list) -> discord.E
     return embed
 
 
-def _bond_embed(user: discord.User | discord.Member, um, guild_id: int) -> discord.Embed:
+def _search_memory_items(um, query: str, include_private: bool) -> list:
+    matches = []
+    for category, items in (
+        ("fact", um._ltm_facts),
+        ("preference", um._ltm_prefs),
+        ("topic", um._ltm_topics),
+    ):
+        for item in um.ordinary_memory_items(items):
+            visible = include_private or (
+                "visibility:public" in item.tags
+                and "visibility:private" not in item.tags
+            )
+            if visible and query in item.content.casefold():
+                matches.append((category, item.content, item.importance))
+    for item in um.get_utm_for_context(include_private):
+        if query in item.casefold():
+            matches.append(("recent", item, 5))
+    return matches
+
+
+def _relationship_label(score: float, private_partner_dm: bool) -> str:
+    if score >= 300 and not private_partner_dm:
+        return relationship_label(299)
+    return relationship_label(score)
+
+
+def _relationship_score(user_id: int, score: float, private_partner_dm: bool) -> float:
+    if aishu_state.is_partner(user_id) and not private_partner_dm:
+        return min(score, 299)
+    return score
+
+
+def _bond_embed(
+    user: discord.User | discord.Member, um, guild_id: int,
+    private_partner_dm: bool = False,
+) -> discord.Embed:
     score = aishu_state.relationships.get_score(guild_id, user.id)
-    label = aishu_state.relationships.get_label(guild_id, user.id)
+    display_score = _relationship_score(user.id, score, private_partner_dm)
+    label = _relationship_label(score, private_partner_dm)
     rs = aishu_state.relationships.get_state(guild_id, user.id)
+    if aishu_state.is_partner(user.id) and not private_partner_dm:
+        rs = None
 
     trust = rs.trust if rs else 0.0
     comfort = rs.comfort if rs else 0.0
@@ -385,21 +488,25 @@ def _bond_embed(user: discord.User | discord.Member, um, guild_id: int) -> disco
 
     embed = discord.Embed(
         title=f"💞 Emotional Bond — {user.display_name} & {aishu_state.name}",
-        description=f"**Level:** {label} ({score:.0f} pts)\n{aishu_state.relationships.describe_relationship(guild_id, user.id)}",
+        description=(
+            f"**Level:** {label} ({display_score:.0f} pts)\n"
+            f"{aishu_state.relationships.describe_relationship(guild_id, user.id, private_partner_dm)}"
+        ),
         color=get_theme_color(),
     )
     embed.set_thumbnail(url=user.display_avatar.url)
 
-    embed.add_field(name="Trust", value=f"`{_bar(trust)}` **{trust:.0f}%**", inline=True)
-    embed.add_field(name="Comfort", value=f"`{_bar(comfort)}` **{comfort:.0f}%**", inline=True)
-    embed.add_field(name="Warmth", value=f"`{_bar(warmth)}` **{warmth:.0f}%**", inline=True)
-    embed.add_field(name="Attachment", value=f"`{_bar(attachment)}` **{attachment:.0f}%**", inline=True)
+    if rs:
+        embed.add_field(name="Trust", value=f"`{_bar(trust)}` **{trust:.0f}%**", inline=True)
+        embed.add_field(name="Comfort", value=f"`{_bar(comfort)}` **{comfort:.0f}%**", inline=True)
+        embed.add_field(name="Warmth", value=f"`{_bar(warmth)}` **{warmth:.0f}%**", inline=True)
+        embed.add_field(name="Attachment", value=f"`{_bar(attachment)}` **{attachment:.0f}%**", inline=True)
     embed.add_field(name="Streak", value=f"🔥 **{um.current_streak}** days", inline=True)
     embed.add_field(name="Messages", value=f"💬 **{um.message_count}** chats", inline=True)
 
-    if aishu_state.is_partner(user.id):
+    if aishu_state.is_partner(user.id) and private_partner_dm:
         embed.add_field(name="Special Status", value="💞 **Life Partner** — The deepest bond possible", inline=False)
-    elif aishu_state.is_lover(user.id):
+    elif aishu_state.is_lover(user.id) and not aishu_state.is_partner(user.id):
         embed.add_field(name="Special Status", value="💕 **Special Person** — Held close to her heart", inline=False)
 
     embed.set_footer(text=f"Aishu's mood: {aishu_state.mood.mood} {aishu_state.mood.emoji} • Talk more to grow closer 🌸")
@@ -475,8 +582,22 @@ def _moments_embed(user: discord.User | discord.Member, um, is_dm: bool = False)
     )
     embed.set_thumbnail(url=user.display_avatar.url)
 
-    facts = [m.content for m in um._ltm_facts if m.importance >= 6]
-    prefs = [m.content for m in um._ltm_prefs]
+    facts = [
+        m.content for m in um.ordinary_memory_items(um._ltm_facts)
+        if m.importance >= 6 and (
+            is_dm or (
+                "visibility:public" in m.tags
+                and "visibility:private" not in m.tags
+            )
+        )
+    ]
+    prefs = [
+        m.content for m in um.ordinary_memory_items(um._ltm_prefs)
+        if is_dm or (
+            "visibility:public" in m.tags
+            and "visibility:private" not in m.tags
+        )
+    ]
 
     if facts:
         embed.add_field(name="📌 Special Facts", value="\n".join(f"• {f[:80]}" for f in facts[-5:]), inline=False)
@@ -676,7 +797,7 @@ class ChatCog(commands.Cog, name="Chat"):
                 text         = message,
                 guild_id     = guild_id,
                 channel_id   = interaction.channel.id if interaction.channel else 0,
-                is_dm        = not bool(interaction.guild),
+                is_dm        = is_one_to_one_dm(interaction.channel, interaction.guild),
                 is_mention   = True,
             )
             await interaction.followup.send(result.chunks[0] if result.chunks else "🌸")
@@ -717,7 +838,13 @@ class ChatCog(commands.Cog, name="Chat"):
         um = memory_manager.load(
             interaction.user.id, str(interaction.user), interaction.user.display_name)
         await interaction.response.send_message(
-            embed=_memories_embed(interaction.user, um), ephemeral=True)
+            embed=_memories_embed(
+                interaction.user, um,
+                include_private_memory=is_one_to_one_dm(
+                    interaction.channel, interaction.guild),
+            ),
+            ephemeral=True,
+        )
 
     @app_commands.command(name="forget", description="Make Aishu forget something")
     @app_commands.describe(keyword="The topic or keyword to forget")
@@ -764,11 +891,20 @@ class ChatCog(commands.Cog, name="Chat"):
     @app_commands.command(name="profile", description="View your (or someone's) Aishu profile")
     @app_commands.describe(member="Leave blank for yourself")
     async def slash_profile(self, interaction: discord.Interaction,
-                            member: discord.Member = None):
+                            member: discord.User | discord.Member = None):
         m        = member or interaction.user
         um       = memory_manager.load(m.id, str(m), m.display_name)
         guild_id = interaction.guild.id if interaction.guild else 0
-        embed    = _profile_embed(m, um, guild_id, self.bot)
+        private_dm = (
+            m.id == interaction.user.id
+            and is_one_to_one_dm(interaction.channel, interaction.guild)
+        )
+        embed = _profile_embed(
+            m, um, guild_id, self.bot,
+            include_user_memory=m.id == interaction.user.id,
+            include_private_memory=private_dm,
+            private_partner_dm=private_dm and aishu_state.is_partner(m.id),
+        )
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="leaderboard", description="Aishu's favorite people 💕")
@@ -801,14 +937,23 @@ class ChatCog(commands.Cog, name="Chat"):
         uid        = interaction.user.id
         guild_id   = interaction.guild.id if interaction.guild else 0
         score      = aishu_state.relationships.get_score(guild_id, uid)
-        label      = relationship_label(score)
+        private_partner_dm = (
+            is_one_to_one_dm(interaction.channel, interaction.guild)
+            and aishu_state.is_partner(uid)
+        )
+        label = _relationship_label(score, private_partner_dm)
+        display_score = _relationship_score(uid, score, private_partner_dm)
         rs         = aishu_state.relationships.get_state(guild_id, uid)
-        is_partner = aishu_state.is_partner(uid)
+        if aishu_state.is_partner(uid) and not private_partner_dm:
+            rs = None
+        is_partner = private_partner_dm
         is_lover   = aishu_state.is_lover(uid)
 
         # User-facing bond description (separate from the AI-prompt version)
         from core.schemas import score_to_rel_tier
         tier = score_to_rel_tier(score)
+        if tier == "partner" and not private_partner_dm:
+            tier = "special_person"
         bond_desc = {
             "partner":        f"💞 {aishu_state.name}'s life partner. the deepest bond possible — she's completely herself with you.",
             "special_person": f"{aishu_state.name} considers you her special person 💕 she notices tiny things you say and genuinely cares about you.",
@@ -841,11 +986,11 @@ class ChatCog(commands.Cog, name="Chat"):
         )
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
         embed.add_field(name="✨ Level",      value=label,              inline=True)
-        embed.add_field(name="💮 Score",      value=f"{score:.0f} pts", inline=True)
+        embed.add_field(name="💮 Score",      value=f"{display_score:.0f} pts", inline=True)
         embed.add_field(name="🌷 Next Level", value=next_str,           inline=False)
         if bond_desc:
             embed.add_field(name="🤍 Bond",   value=bond_desc,          inline=False)
-        if rs:
+        if rs and (not aishu_state.is_partner(uid) or private_partner_dm):
             embed.add_field(
                 name  = "📊 Details",
                 value = (
@@ -861,7 +1006,7 @@ class ChatCog(commands.Cog, name="Chat"):
                 value = f"you are {aishu_state.name}'s life partner — the deepest bond possible 💞",
                 inline= False,
             )
-        elif is_lover:
+        elif is_lover and not aishu_state.is_partner(uid):
             embed.add_field(
                 name  = "💕 Special",
                 value = f"you're {aishu_state.name}'s special person 🌸",
@@ -902,6 +1047,14 @@ class ChatCog(commands.Cog, name="Chat"):
     # /export
     @app_commands.command(name="export", description="Download your Aishu memory as a JSON file")
     async def slash_export(self, interaction: discord.Interaction):
+        if not is_one_to_one_dm(
+            interaction.channel, interaction.guild, interaction.user.id
+        ):
+            await interaction.response.send_message(
+                "for your privacy, download a complete memory export in a 1-on-1 DM with me 🌸",
+                ephemeral=True,
+            )
+            return
         await interaction.response.defer(ephemeral=True)
         um = memory_manager.load(
             interaction.user.id, str(interaction.user), interaction.user.display_name)
@@ -914,7 +1067,12 @@ class ChatCog(commands.Cog, name="Chat"):
             embed.set_footer(text="your memories will appear here once we've talked a little 🌸")
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
-        data     = um.export_dict()
+        data = um.export_dict(
+            requester_id=interaction.user.id,
+            partner_id=aishu_state.partner_id,
+            channel=interaction.channel,
+            guild=interaction.guild,
+        )
         filename = f"aishu_memory_{interaction.user.id}.json"
         try:
             payload = io.BytesIO(json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"))
@@ -942,7 +1100,9 @@ class ChatCog(commands.Cog, name="Chat"):
     @app_commands.command(name="rp_status", description="Check your active roleplay with Aishu 🎭")
     async def slash_rp_status(self, interaction: discord.Interaction):
         uid = interaction.user.id
-        if not aishu_state.is_partner(uid):
+        if not aishu_state.is_partner(uid) or not is_one_to_one_dm(
+            interaction.channel, interaction.guild
+        ):
             await interaction.response.send_message(
                 "roleplay is only available for Aishu's partner 💞", ephemeral=True)
             return
@@ -1006,7 +1166,9 @@ class ChatCog(commands.Cog, name="Chat"):
     @app_commands.command(name="rp_history", description="View your past roleplay sessions 🎭")
     async def slash_rp_history(self, interaction: discord.Interaction):
         uid = interaction.user.id
-        if not aishu_state.is_partner(uid):
+        if not aishu_state.is_partner(uid) or not is_one_to_one_dm(
+            interaction.channel, interaction.guild
+        ):
             await interaction.response.send_message(
                 "roleplay is only available for Aishu's partner 💞", ephemeral=True)
             return
@@ -1028,7 +1190,9 @@ class ChatCog(commands.Cog, name="Chat"):
     @app_commands.command(name="rp_end", description="End the current roleplay session 🎭")
     async def slash_rp_end(self, interaction: discord.Interaction):
         uid = interaction.user.id
-        if not aishu_state.is_partner(uid):
+        if not aishu_state.is_partner(uid) or not is_one_to_one_dm(
+            interaction.channel, interaction.guild
+        ):
             await interaction.response.send_message(
                 "roleplay is only available for Aishu's partner 💞", ephemeral=True)
             return
@@ -1062,13 +1226,15 @@ class ChatCog(commands.Cog, name="Chat"):
             return
         um = memory_manager.load(interaction.user.id, str(interaction.user), interaction.user.display_name)
         category = "pref" if is_preference(content) else "fact"
-        if category == "pref":
-            um.add_pref(content, importance=9, source="user_stated")
-        else:
-            um.add_fact(content, importance=9, source="user_stated")
-        um.flush()
+        if not um.remember_public(content, category):
+            await interaction.response.send_message(
+                "i couldn't safely save and confirm that memory. if it overlaps an existing fact, "
+                "use the exact wording; otherwise please try again 🌸",
+                ephemeral=True,
+            )
+            return
         embed = _remember_embed(interaction.user.display_name, content, category)
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # /memorysearch
     @app_commands.command(name="memorysearch", description="Search through your saved memories with Aishu 🔍")
@@ -1079,19 +1245,10 @@ class ChatCog(commands.Cog, name="Chat"):
             await interaction.response.send_message("give me a keyword to search for~", ephemeral=True)
             return
         um = memory_manager.load(interaction.user.id, str(interaction.user), interaction.user.display_name)
-        matches = []
-        for m in um._ltm_facts:
-            if q in m.content.lower():
-                matches.append(("fact", m.content, m.importance))
-        for m in um._ltm_prefs:
-            if q in m.content.lower():
-                matches.append(("preference", m.content, m.importance))
-        for m in um._ltm_topics:
-            if q in m.content.lower():
-                matches.append(("topic", m.content, m.importance))
-        for item in um._utm:
-            if q in item.lower():
-                matches.append(("recent", item, 5))
+        matches = _search_memory_items(
+            um, q,
+            include_private=is_one_to_one_dm(interaction.channel, interaction.guild),
+        )
         embed = _memory_search_embed(interaction.user.display_name, query, matches)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1104,7 +1261,12 @@ class ChatCog(commands.Cog, name="Chat"):
             target = interaction.user
         guild_id = interaction.guild.id if interaction.guild else 0
         um = memory_manager.load(target.id, str(target), target.display_name)
-        embed = _bond_embed(target, um, guild_id)
+        private_partner_dm = (
+            target.id == interaction.user.id
+            and is_one_to_one_dm(interaction.channel, interaction.guild)
+            and aishu_state.is_partner(target.id)
+        )
+        embed = _bond_embed(target, um, guild_id, private_partner_dm)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     # /diary
@@ -1122,7 +1284,7 @@ class ChatCog(commands.Cog, name="Chat"):
         if target.id != interaction.user.id:
             await interaction.response.send_message("you can only view your own moments with Aishu 🌸", ephemeral=True)
             return
-        is_dm = not bool(interaction.guild)
+        is_dm = is_one_to_one_dm(interaction.channel, interaction.guild)
         um = memory_manager.load(target.id, str(target), target.display_name)
         embed = _moments_embed(target, um, is_dm=is_dm)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -1140,7 +1302,12 @@ class ChatCog(commands.Cog, name="Chat"):
             guild_id = interaction.guild.id if interaction.guild else 0
             um = memory_manager.load(uid, str(interaction.user), interaction.user.display_name)
             p = prompt.strip()
-            if um.roleplay and um.roleplay.is_active:
+            partner_dm = (
+                is_one_to_one_dm(interaction.channel, interaction.guild)
+                and aishu_state.is_partner(uid)
+                and memory_manager.is_memory_enabled()
+            )
+            if partner_dm and um.roleplay and um.roleplay.is_active:
                 text = f"continue: {p}" if p else "please continue the story naturally from where we left off"
             else:
                 text = f"continue: {p}" if p else "continue what you were saying earlier"
@@ -1148,7 +1315,7 @@ class ChatCog(commands.Cog, name="Chat"):
             result = await brain_router.process(
                 user_id=uid, username=str(interaction.user), display_name=interaction.user.display_name,
                 text=text, guild_id=guild_id, channel_id=interaction.channel_id,
-                is_dm=not bool(interaction.guild),
+                is_dm=is_one_to_one_dm(interaction.channel, interaction.guild),
             )
             if not result.chunks:
                 await interaction.followup.send("i couldn't think of what to say next 😅 say something to me!")
@@ -1267,7 +1434,7 @@ class ChatCog(commands.Cog, name="Chat"):
         guild_id = ctx.guild.id if ctx.guild else 0
         await do_reply(ctx.message, uid, guild_id,
                        str(ctx.author), ctx.author.display_name, text,
-                       is_dm=not ctx.guild)
+                       is_dm=is_one_to_one_dm(ctx.channel, ctx.guild))
 
     @commands.command(name="continue", aliases=["cont"])
     @commands.cooldown(1, 3, commands.BucketType.user)
@@ -1280,11 +1447,20 @@ class ChatCog(commands.Cog, name="Chat"):
         guild_id = ctx.guild.id if ctx.guild else 0
         um = memory_manager.load(uid, str(ctx.author), ctx.author.display_name)
         p = prompt.strip()
-        if um.roleplay and um.roleplay.is_active:
+        partner_dm = (
+            is_one_to_one_dm(ctx.channel, ctx.guild)
+            and aishu_state.is_partner(uid)
+            and memory_manager.is_memory_enabled()
+        )
+        if partner_dm and um.roleplay and um.roleplay.is_active:
             text = f"continue: {p}" if p else "please continue the story naturally from where we left off"
         else:
             text = f"continue: {p}" if p else "continue what you were saying earlier"
-        await do_reply(ctx.message, uid, guild_id, str(ctx.author), ctx.author.display_name, text, is_dm=not ctx.guild)
+        await do_reply(
+            ctx.message, uid, guild_id, str(ctx.author),
+            ctx.author.display_name, text,
+            is_dm=is_one_to_one_dm(ctx.channel, ctx.guild),
+        )
 
     @commands.command(name="image", aliases=["draw", "imagine"])
     @commands.cooldown(1, 12, commands.BucketType.user)
@@ -1369,7 +1545,10 @@ class ChatCog(commands.Cog, name="Chat"):
     @commands.command(name="memories", aliases=["memory", "mem", "know"])
     async def memories_cmd(self, ctx: commands.Context):
         um = memory_manager.load(ctx.author.id, str(ctx.author), ctx.author.display_name)
-        await ctx.send(embed=_memories_embed(ctx.author, um))
+        await ctx.send(embed=_memories_embed(
+            ctx.author, um,
+            include_private_memory=is_one_to_one_dm(ctx.channel, ctx.guild),
+        ))
 
     @commands.command(name="remember", aliases=["rem"])
     @commands.cooldown(1, 3, commands.BucketType.user)
@@ -1380,11 +1559,12 @@ class ChatCog(commands.Cog, name="Chat"):
             return
         um = memory_manager.load(ctx.author.id, str(ctx.author), ctx.author.display_name)
         category = "pref" if is_preference(content) else "fact"
-        if category == "pref":
-            um.add_pref(content, importance=9, source="user_stated")
-        else:
-            um.add_fact(content, importance=9, source="user_stated")
-        um.flush()
+        if not um.remember_public(content, category):
+            await ctx.send(
+                "i couldn't safely save and confirm that memory. if it overlaps an existing fact, "
+                "use the exact wording; otherwise please try again 🌸"
+            )
+            return
         embed = _remember_embed(ctx.author.display_name, content, category)
         await ctx.send(embed=embed)
 
@@ -1396,19 +1576,8 @@ class ChatCog(commands.Cog, name="Chat"):
             await ctx.send(f"tell me what to search for! e.g. `{cfg.PREFIX}memorysearch coffee`")
             return
         um = memory_manager.load(ctx.author.id, str(ctx.author), ctx.author.display_name)
-        matches = []
-        for m in um._ltm_facts:
-            if q in m.content.lower():
-                matches.append(("fact", m.content, m.importance))
-        for m in um._ltm_prefs:
-            if q in m.content.lower():
-                matches.append(("preference", m.content, m.importance))
-        for m in um._ltm_topics:
-            if q in m.content.lower():
-                matches.append(("topic", m.content, m.importance))
-        for item in um._utm:
-            if q in item.lower():
-                matches.append(("recent", item, 5))
+        matches = _search_memory_items(
+            um, q, include_private=is_one_to_one_dm(ctx.channel, ctx.guild))
         embed = _memory_search_embed(ctx.author.display_name, query, matches)
         await ctx.send(embed=embed)
 
@@ -1464,6 +1633,10 @@ class ChatCog(commands.Cog, name="Chat"):
     @commands.command(name="export")
     async def export_cmd(self, ctx: commands.Context):
         """Export your memory data as a JSON file."""
+        if not is_one_to_one_dm(ctx.channel, ctx.guild, ctx.author.id):
+            await ctx.send(
+                "for your privacy, download a complete memory export in a 1-on-1 DM with me 🌸")
+            return
         um = memory_manager.load(ctx.author.id, str(ctx.author), ctx.author.display_name)
         if not um.has_long_term_memory() and um.message_count == 0:
             embed = discord.Embed(
@@ -1474,7 +1647,12 @@ class ChatCog(commands.Cog, name="Chat"):
             embed.set_footer(text="your memories will appear here once we've talked a little 🌸")
             await ctx.send(embed=embed)
             return
-        data     = um.export_dict()
+        data = um.export_dict(
+            requester_id=ctx.author.id,
+            partner_id=aishu_state.partner_id,
+            channel=ctx.channel,
+            guild=ctx.guild,
+        )
         filename = f"aishu_memory_{ctx.author.id}.json"
         try:
             payload = io.BytesIO(json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8"))
@@ -1503,7 +1681,16 @@ class ChatCog(commands.Cog, name="Chat"):
         m        = member or ctx.author
         um       = memory_manager.load(m.id, str(m), m.display_name)
         guild_id = ctx.guild.id if ctx.guild else 0
-        await ctx.send(embed=_profile_embed(m, um, guild_id, self.bot))
+        private_dm = (
+            m.id == ctx.author.id
+            and is_one_to_one_dm(ctx.channel, ctx.guild)
+        )
+        await ctx.send(embed=_profile_embed(
+            m, um, guild_id, self.bot,
+            include_user_memory=m.id == ctx.author.id,
+            include_private_memory=private_dm,
+            private_partner_dm=private_dm and aishu_state.is_partner(m.id),
+        ))
 
     @commands.command(name="leaderboard", aliases=["lb", "top", "fav", "favorites"])
     async def lb_cmd(self, ctx: commands.Context):
@@ -1532,9 +1719,17 @@ class ChatCog(commands.Cog, name="Chat"):
         m        = member or ctx.author
         guild_id = ctx.guild.id if ctx.guild else 0
         score    = aishu_state.relationships.get_score(guild_id, m.id)
-        label    = relationship_label(score)
+        private_partner_dm = (
+            m.id == ctx.author.id
+            and is_one_to_one_dm(ctx.channel, ctx.guild)
+            and aishu_state.is_partner(m.id)
+        )
+        label = _relationship_label(score, private_partner_dm)
+        display_score = _relationship_score(m.id, score, private_partner_dm)
         from core.schemas import score_to_rel_tier
         tier = score_to_rel_tier(score)
+        if tier == "partner" and not private_partner_dm:
+            tier = "special_person"
         bond_desc = {
             "partner":        f"💞 life partner — {aishu_state.name} is completely herself with them.",
             "special_person": f"special person 💕 {aishu_state.name} genuinely cares about them.",
@@ -1544,7 +1739,7 @@ class ChatCog(commands.Cog, name="Chat"):
             "stranger":       "strangers so far 🤍 more chatting needed!",
         }.get(tier, "")
         embed = _embed(0xFF69B4, f"{m.display_name}'s bond with {aishu_state.name} 💕",
-                       f"**{label}**  •  {score:.0f} pts\n\n{bond_desc}")
+                       f"**{label}**  •  {display_score:.0f} pts\n\n{bond_desc}")
         await ctx.send(embed=embed)
 
     @commands.command(name="bond")
@@ -1555,7 +1750,12 @@ class ChatCog(commands.Cog, name="Chat"):
             target = ctx.author
         guild_id = ctx.guild.id if ctx.guild else 0
         um = memory_manager.load(target.id, str(target), target.display_name)
-        embed = _bond_embed(target, um, guild_id)
+        private_partner_dm = (
+            target.id == ctx.author.id
+            and is_one_to_one_dm(ctx.channel, ctx.guild)
+            and aishu_state.is_partner(target.id)
+        )
+        embed = _bond_embed(target, um, guild_id, private_partner_dm)
         await ctx.send(embed=embed)
 
     @commands.command(name="diary")
@@ -1572,7 +1772,7 @@ class ChatCog(commands.Cog, name="Chat"):
         if target.id != ctx.author.id:
             await ctx.send("you can only view your own moments with Aishu 🌸", delete_after=4)
             return
-        is_dm = not bool(ctx.guild)
+        is_dm = is_one_to_one_dm(ctx.channel, ctx.guild)
         um = memory_manager.load(target.id, str(target), target.display_name)
         embed = _moments_embed(target, um, is_dm=is_dm)
         await ctx.send(embed=embed)
@@ -1606,7 +1806,9 @@ class ChatCog(commands.Cog, name="Chat"):
     @commands.command(name="rp_status")
     @commands.cooldown(1, 4, commands.BucketType.user)
     async def rp_status_cmd(self, ctx: commands.Context):
-        if not aishu_state.is_partner(ctx.author.id):
+        if not aishu_state.is_partner(ctx.author.id) or not is_one_to_one_dm(
+            ctx.channel, ctx.guild
+        ):
             await ctx.send("roleplay is only available for Aishu's partner 💞", delete_after=4)
             return
         um = memory_manager.load(ctx.author.id, str(ctx.author), ctx.author.display_name)
@@ -1632,7 +1834,9 @@ class ChatCog(commands.Cog, name="Chat"):
     @commands.command(name="rp_history")
     @commands.cooldown(1, 4, commands.BucketType.user)
     async def rp_history_cmd(self, ctx: commands.Context):
-        if not aishu_state.is_partner(ctx.author.id):
+        if not aishu_state.is_partner(ctx.author.id) or not is_one_to_one_dm(
+            ctx.channel, ctx.guild
+        ):
             await ctx.send("roleplay is only available for Aishu's partner 💞", delete_after=4)
             return
         um = memory_manager.load(ctx.author.id, str(ctx.author), ctx.author.display_name)
@@ -1647,7 +1851,9 @@ class ChatCog(commands.Cog, name="Chat"):
     @commands.command(name="rp_end")
     @commands.cooldown(1, 4, commands.BucketType.user)
     async def rp_end_cmd(self, ctx: commands.Context):
-        if not aishu_state.is_partner(ctx.author.id):
+        if not aishu_state.is_partner(ctx.author.id) or not is_one_to_one_dm(
+            ctx.channel, ctx.guild
+        ):
             await ctx.send("roleplay is only available for Aishu's partner 💞", delete_after=4)
             return
         um = memory_manager.load(ctx.author.id, str(ctx.author), ctx.author.display_name)

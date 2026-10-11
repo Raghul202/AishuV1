@@ -9,6 +9,21 @@ import os
 from pathlib import Path
 
 
+def _env_or_default(name: str, default: str = "") -> str:
+    value = os.getenv(name, default)
+    return value.strip() if isinstance(value, str) else str(value)
+
+
+def _env_int(name: str, default: int = 0) -> int:
+    value = _env_or_default(name, str(default))
+    if not value:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _load_local_env() -> None:
     """Load the optional ignored .env file without adding a dependency.
 
@@ -32,38 +47,38 @@ _load_local_env()
 #  CREDENTIALS  ← Fill these in before running
 # ══════════════════════════════════════════════════════════════════
 
-DISCORD_TOKEN    = os.getenv("DISCORD_TOKEN", "")
-OPENROUTER_KEY   = os.getenv("OPENROUTER_KEY", os.getenv("OPENROUTER_API_KEY", ""))
-HF_API_KEY       = os.getenv("HF_API_KEY", "")
-GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
-GROQ_API_KEY     = os.getenv("GROQ_API_KEY", "")
-NVIDIA_API_KEY   = os.getenv("NVIDIA_API_KEY", "")
-COHERE_API_KEY   = os.getenv("COHERE_API_KEY", "")
-CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
-EDENAI_API_KEY   = os.getenv("EDENAI_API_KEY", os.getenv("EDEN_AI_API_KEY", ""))
+DISCORD_TOKEN    = _env_or_default("DISCORD_TOKEN")
+OPENROUTER_KEY   = _env_or_default("OPENROUTER_KEY") or _env_or_default("OPENROUTER_API_KEY")
+HF_API_KEY       = _env_or_default("HF_API_KEY")
+GEMINI_API_KEY   = _env_or_default("GEMINI_API_KEY") or _env_or_default("GOOGLE_API_KEY")
+GROQ_API_KEY     = _env_or_default("GROQ_API_KEY")
+NVIDIA_API_KEY   = _env_or_default("NVIDIA_API_KEY")
+COHERE_API_KEY   = _env_or_default("COHERE_API_KEY")
+CEREBRAS_API_KEY = _env_or_default("CEREBRAS_API_KEY")
+EDENAI_API_KEY   = _env_or_default("EDENAI_API_KEY") or _env_or_default("EDEN_AI_API_KEY")
 
 # Your Discord user ID — for owner-only commands
-BOT_OWNER_ID     = int(os.getenv("BOT_OWNER_ID", "0"))
+BOT_OWNER_ID     = _env_int("BOT_OWNER_ID")
 
 # ══════════════════════════════════════════════════════════════════
 #  DASHBOARD SETTINGS
 # ══════════════════════════════════════════════════════════════════
 
-DASHBOARD_ENABLED  = os.getenv("DASHBOARD_ENABLED", "false").lower() in ("true", "1", "yes")
-DASHBOARD_PORT     = int(os.getenv("SERVER_PORT", os.getenv("PORT", os.getenv("DASHBOARD_PORT", os.getenv("APP_PORT", "8080")))))
-DASHBOARD_HOST     = os.getenv("DASHBOARD_HOST", "127.0.0.1")
-DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+DASHBOARD_ENABLED  = _env_or_default("DASHBOARD_ENABLED", "false").lower() in ("true", "1", "yes")
+DASHBOARD_PORT     = _env_int("SERVER_PORT", _env_int("PORT", _env_int("DASHBOARD_PORT", _env_int("APP_PORT", 8080))))
+DASHBOARD_HOST     = _env_or_default("DASHBOARD_HOST", "127.0.0.1")
+DASHBOARD_PASSWORD = _env_or_default("DASHBOARD_PASSWORD")
 # Comma-separated proxy IPs/CIDRs allowed to supply X-Forwarded-For. Leave
 # empty unless the dashboard sits behind a proxy you control.
 DASHBOARD_TRUSTED_PROXY_CIDRS = tuple(
-    value.strip() for value in os.getenv("DASHBOARD_TRUSTED_PROXY_CIDRS", "").split(",")
+    value.strip() for value in _env_or_default("DASHBOARD_TRUSTED_PROXY_CIDRS", "").split(",")
     if value.strip()
 )
 
 # Discord OAuth2 settings for Dashboard Login
-DISCORD_CLIENT_ID     = os.getenv("DISCORD_CLIENT_ID", "1480053118510305432")
-DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
-DISCORD_REDIRECT_URI  = os.getenv("DISCORD_REDIRECT_URI", "https://aishu.apps.bot-hosting.cloud/auth/discord/callback")
+DISCORD_CLIENT_ID     = _env_or_default("DISCORD_CLIENT_ID", "1480053118510305432")
+DISCORD_CLIENT_SECRET = _env_or_default("DISCORD_CLIENT_SECRET")
+DISCORD_REDIRECT_URI  = _env_or_default("DISCORD_REDIRECT_URI", "https://aishu.apps.bot-hosting.cloud/auth/discord/callback")
 
 # ══════════════════════════════════════════════════════════════════
 #  BOT BEHAVIOUR
@@ -97,12 +112,11 @@ MAX_IMAGE_INPUT_BYTES = 8 * 1024 * 1024
 
 # OpenRouter API headers
 OPENROUTER_HEADERS = {
-    "Authorization":  f"Bearer {OPENROUTER_KEY}",
-    "Content-Type":   "application/json",
-    "HTTP-Referer":   "https://github.com/aishu-bot",
-    "X-Title":        "Aishu Discord Bot",
+    "Authorization": f"Bearer {OPENROUTER_KEY}" if OPENROUTER_KEY else "Bearer ",
+    "Content-Type": "application/json",
+    "HTTP-Referer": "https://github.com/aishu-bot",
+    "X-Title": "Aishu Discord Bot",
 }
-
 # ── Gemini (google-genai SDK) ──────────────────────────────────────────────────
 # Get your free key at: https://aistudio.google.com
 # Free tier: gemini-2.5-flash = 250 req/day, gemini-2.5-flash-lite = 1000 req/day

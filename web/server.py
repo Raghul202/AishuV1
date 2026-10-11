@@ -1716,8 +1716,10 @@ class DashboardServer:
                 if not access_token:
                     return web.HTTPFound("/?error=no_access_token")
 
-                user_headers = {"Authorization": f"Bearer {access_token}"}
-                async with session.get("https://discord.com/api/v10/users/@me", headers=user_headers) as user_resp:
+                async with session.get(
+                    "https://discord.com/api/v10/users/@me",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                ) as user_resp:
                     if user_resp.status != 200:
                         return web.HTTPFound("/?error=user_fetch_failed")
                     user_data = await user_resp.json()
@@ -2069,9 +2071,10 @@ class DashboardServer:
 
         from brain.prompt_engine import prompt_engine
         prompt, ctx = prompt_engine.build_system_prompt(
-            aishu=aishu_state, um=um, guild_id=0, server_topics=[], current_msg=message
+            aishu=aishu_state, um=um, guild_id=0, server_topics=[], current_msg=message,
+            memory_allowed=False,
         )
-        messages = prompt_engine.build_messages(prompt, um.get_stm_list()[-6:], message)
+        messages = prompt_engine.build_messages(prompt, [], message)
 
         t0 = time.perf_counter()
         reply_text, model_used, _api_latency_ms, failure = await asyncio.to_thread(

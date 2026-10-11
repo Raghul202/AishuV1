@@ -125,8 +125,8 @@ class ModelController:
         """OpenRouter session (thread-local)."""
         if not hasattr(self._local, "session"):
             self._local.session = self._create_pooled_session({
-                "Authorization": f"Bearer {OPENROUTER_KEY}",
-                "Content-Type":  "application/json",
+                                "Authorization": f"Bearer {OPENROUTER_KEY}" if OPENROUTER_KEY else "Bearer ",
+"Content-Type":  "application/json",
                 "HTTP-Referer":  "https://github.com/aishu-bot",
                 "X-Title":       "Aishu Discord Bot",
             })
@@ -136,8 +136,8 @@ class ModelController:
         """HuggingFace session (thread-local)."""
         if not hasattr(self._local, "hf_session"):
             self._local.hf_session = self._create_pooled_session({
-                "Authorization": f"Bearer {HF_API_KEY}",
-                "Content-Type":  "application/json",
+                                "Authorization": f"Bearer {HF_API_KEY}" if HF_API_KEY else "Bearer ",
+"Content-Type":  "application/json",
             })
         return self._local.hf_session
 
@@ -145,8 +145,8 @@ class ModelController:
         """Groq session (thread-local)."""
         if not hasattr(self._local, "groq_session"):
             self._local.groq_session = self._create_pooled_session({
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type":  "application/json",
+                                "Authorization": f"Bearer {GROQ_API_KEY}" if GROQ_API_KEY else "Bearer ",
+"Content-Type":  "application/json",
             })
         return self._local.groq_session
 
@@ -154,8 +154,8 @@ class ModelController:
         """Cloudflare Workers AI session (thread-local)."""
         if not hasattr(self._local, "cf_session"):
             self._local.cf_session = self._create_pooled_session({
-                "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}",
-                "Content-Type":  "application/json",
+                                "Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}" if CLOUDFLARE_API_TOKEN else "Bearer ",
+"Content-Type":  "application/json",
             })
         return self._local.cf_session
 
@@ -163,8 +163,8 @@ class ModelController:
         """NVIDIA NIM uses the OpenAI chat-completions wire format."""
         if not hasattr(self._local, "nim_session"):
             self._local.nim_session = self._create_pooled_session({
-                "Authorization": f"Bearer {NVIDIA_API_KEY}",
-                "Content-Type": "application/json",
+                                "Authorization": f"Bearer {NVIDIA_API_KEY}" if NVIDIA_API_KEY else "Bearer ",
+"Content-Type": "application/json",
             })
         return self._local.nim_session
 
@@ -293,7 +293,7 @@ class ModelController:
         if NVIDIA_API_KEY:
             for models in NVIDIA_NIM_MODELS.values():
                 candidates.extend(_NIM_PREFIX + model for model in models)
-        if OPENROUTER_HEADERS.get("Authorization") != "Bearer ":
+        if bool(OPENROUTER_KEY):
             candidates.extend(FREE_MODELS)
             candidates.extend(OPENROUTER_RATE_LIMITED_MODELS)
         if GROQ_API_KEY:
@@ -803,7 +803,7 @@ class ModelController:
 
         # Try only a small, ranked set per request.  Exhausting every configured
         # model makes a transient provider outage painfully slow for Discord users.
-        for model in (self._ordered_models()[:3] if OPENROUTER_HEADERS.get("Authorization") != "Bearer " else []):
+        for model in (self._ordered_models()[:3] if bool(OPENROUTER_KEY) else []):
             reply = self._call_model(model, messages)
             if reply:
                 return (reply, model, (time.monotonic() - start) * 1000, "")
@@ -834,7 +834,7 @@ class ModelController:
 
         # Known free models that were rate-limited in the supplied probe are a
         # final, single-attempt fallback only. Their 429 response adds a cooldown.
-        if OPENROUTER_HEADERS.get("Authorization") != "Bearer ":
+        if bool(OPENROUTER_KEY):
             for model in OPENROUTER_RATE_LIMITED_MODELS:
                 reply = self._call_model(model, messages)
                 if reply:

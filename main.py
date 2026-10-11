@@ -191,10 +191,11 @@ async def main():
                 or (hasattr(message.channel, "recipients") and len(getattr(message.channel, "recipients", [])) > 1)
             )
             if is_group_dm:
-                # In Group DMs with multiple people: only respond when mentioned or addressed by name
+                # In Group DMs with multiple people: respond when mentioned, replied to, or addressed by name
                 mentioned = bot.user in message.mentions
-                name_addressed = bool(re.search(r"\baishu\b", text, re.IGNORECASE))
-                if not (mentioned or name_addressed):
+                is_reply = bool(message.reference and message.reference.message_id)
+                name_addressed = bool(re.search(r"\b(?:hey\s+)?aishu\b", text, re.IGNORECASE))
+                if not (mentioned or name_addressed or (is_reply and (mentioned or name_addressed))):
                     return  # Avoid interrupting conversations between other people
 
                 clean_text = clean_mention(text, bot.user.id)
@@ -246,10 +247,18 @@ async def main():
         quiet      = memory_manager.is_quiet(message.channel.id, guild_id)
         in_auto_ch = (message.channel.id == auto_ch) and not quiet
 
-        if not (in_auto_ch or mentioned):
+        is_reply = bool(message.reference and message.reference.message_id)
+        # Check if message mentions bot, is in auto-channel, is a reply with mention or alias
+        alias_match = re.search(r"\b(?:hey\s+)?aishu\b", message.content, re.IGNORECASE)
+        is_alias = bool(alias_match)
+
+        # Trigger if in auto-channel, explicitly mentioned, or an addressed reply/alias
+        if not (in_auto_ch or mentioned or (is_reply and (mentioned or is_alias)) or is_alias):
             return
 
         text = clean_mention(message.content, bot.user.id)
+        # Clean leading alias if present (e.g. "aishu what do you think?")
+        text = re.sub(r"^(?:hey\s+)?aishu\b[,:\s]*", "", text, flags=re.IGNORECASE).strip()
         if not text or text.startswith(cfg.PREFIX):
             return
 

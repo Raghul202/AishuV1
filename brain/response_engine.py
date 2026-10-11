@@ -81,6 +81,8 @@ class ResponseEngine:
         text = self._remove_bot_phrases(text)
         text = self._apply_replacements(text)
         text = self._apply_mood_touch(text, mood)
+        from utilities.helpers import format_user_mentions
+        text = format_user_mentions(text)
         text = text.strip()
 
         if not text:

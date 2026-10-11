@@ -33,10 +33,11 @@ When you talk with Aishu or execute commands, the following metadata is stored:
 ### B. Conversation Context (Short-Term Memory / STM)
 - A rolling snapshot of your most recent conversation turns (up to **12 messages** per scope).
 - Used solely to maintain conversational continuity within multi-turn dialogues so Aishu remembers what was said a few moments ago.
+- Each server's, ordinary 1-on-1 DM's, and designated-partner's conversation streams are stored separately. Ambiguous legacy conversation history is treated as private and is not supplied in server-channel prompts.
 - When you execute `/clear` or `!clear`, this conversation history is immediately wiped from the database.
 
 ### C. Personal Facts, Preferences & Topics (Long-Term Memory / LTM)
-- **User-Stated Facts & Preferences**: Specific information you share in conversation (e.g. your favorite game, pets, hobbies, timezone) or teach via `/remember <fact>`.
+- **User-Stated Facts & Preferences**: Specific information you share in conversation (e.g. your favorite game, pets, hobbies, timezone). Facts deliberately saved with `/remember <fact>` are marked as shareable personal context for relevant replies across your servers, channels, and DMs; private conversation transcripts and partner-only memory remain separate. Re-saving an existing legacy fact with `/remember` is the explicit action that makes that fact shareable.
 - **Topic Keywords**: Keywords related to conversations you have had with Aishu to facilitate context retrieval.
 - **Importance & Mention Counters**: Internal numeric weights (1–10) and mention frequencies used by the memory optimizer to select relevant memories within model token limits.
 
@@ -89,10 +90,11 @@ These third-party providers process the prompt strictly in real time to generate
 ## 5. Data Privacy Boundaries (Server Channels vs. DMs vs. Group DMs)
 
 Aishu enforces strict data boundaries:
-1. **Public Server Channels:** Only public relationship tiers, server configs, and user-associated public memories are accessed. Partner-private relationship details and roleplay story moments are strictly blocked.
-2. **Multi-User Group DMs:** Treated as multi-user public spaces. Aishu requires direct mentions or name addressals, and private partner roleplay/intimate memories remain inaccessible.
+1. **Public Server Channels:** Aishu may use user-associated memories learned in server channels and facts deliberately marked shareable with `/remember`, while genuinely server-specific topics remain scoped to their guild. Automatically learned DM memories and legacy memories without an explicit visibility classification are not included. Legacy memories remain stored and private unless explicitly re-saved with `/remember`. Disabling memory for a guild disables conversational memory retrieval and new conversational memory writes there.
+2. **Multi-User Group DMs:** Treated as multi-user public spaces. Aishu requires direct mentions or name addressals, and personal-memory retrieval and writes are disabled; private partner roleplay/intimate memories remain inaccessible.
 3. **1-on-1 Direct Messages:** Private conversational memory and partner roleplay are active exclusively in authenticated 1-on-1 DMs.
 4. **Command Privacy:** Personal commands such as `/memories`, `/export`, `/bond`, and `/moments` are returned as ephemeral responses or restricted to self-viewing to prevent unauthorized inspection by other guild members.
+5. **Global Memory Toggle:** When disabled in the dashboard, conversational memory retrieval and writes are suppressed across all contexts. Explicit user-directed memory-management commands remain available. Personality and authorized partner identity routing remain active.
 
 ---
 
@@ -103,7 +105,7 @@ In accordance with Discord Developer Policies and standard privacy practices, yo
 - **View Your Stored Data:**  
   Run `/memories` (slash command) or `!memories` (prefix command) to see what Aishu remembers about you.
 - **Export Your Stored Data:**  
-  Run `/export` or `!export` to receive a complete, structured JSON export of all your stored data (`aishu_memory_<your_id>.json`).
+  Run `/export` or `!export` in a verified 1-on-1 DM to receive a complete, structured JSON export of your stored data (`aishu_memory_<your_id>.json`). Partner-private data is included only for the designated partner in that same private context.
 - **Delete Specific Memories:**  
   Run `/forget <keyword>` or `!forget <keyword>` (e.g. `/forget gaming`) to delete all memories matching that topic.
 - **Completely Wipe All Your Data:**  

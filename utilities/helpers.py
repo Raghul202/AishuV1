@@ -126,6 +126,33 @@ def clean_mention(text: str, bot_id: int) -> str:
     return text.replace(f"<@{bot_id}>", "").replace(f"<@!{bot_id}>", "").strip()
 
 
+def format_user_mentions(text: str) -> str:
+    """Convert raw user IDs like @123456789012345678 into proper Discord mentions <@123456789012345678>.
+
+    Preserves already formatted mentions like <@123> or <@!123>.
+    Valid Discord snowflake IDs are between 17 and 20 digits long.
+    """
+    if not text:
+        return text
+    # Match @\d{17,20} where @ is not preceded by < or <! and not followed by >
+    return re.sub(r"(?<!<)(?<!<!)@(\d{17,20})\b(?!>)", r"<@\1>", text)
+
+
+def is_one_to_one_dm(channel, guild=None, user_id: int = 0) -> bool:
+    """Return True only for a direct message channel with one other recipient."""
+    if guild is not None or channel is None:
+        return False
+    if type(channel).__name__ != "DMChannel":
+        return False
+    recipient = getattr(channel, "recipient", None)
+    recipients = getattr(channel, "recipients", None)
+    if recipient is None and recipients is not None and len(recipients) == 1:
+        recipient = recipients[0]
+    if recipient is None:
+        return False
+    return not user_id or getattr(recipient, "id", None) == user_id
+
+
 def mood_to_emoji(mood: str) -> str:
     """Return the emoji for a given mood string."""
     return {

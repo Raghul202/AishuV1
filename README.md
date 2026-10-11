@@ -14,7 +14,7 @@
 ## ✨ Key Features
 
 - **🧠 Multi-Layered Memory Architecture**:
-  - **STM (Short-Term Memory)**: Rolling conversational context (up to 12 turns) to keep discussions coherent across restarts.
+  - **STM (Short-Term Memory)**: Rolling conversational context (up to 12 messages per scope), isolated by guild, ordinary DM, and partner DM so unrelated conversations do not bleed together across restarts.
   - **UTM (User Topic Memory)**: Topic frequency tracker for promotion candidate memories.
   - **LTM (Long-Term Memory)**: Persistent personal facts, preferences, and topic associations stored in a local SQLite database (`data/aishu.db`).
   - **Partner Private Memory & Roleplay**: Separate private memory bucket for life-partner interactions and dynamic roleplay sessions.

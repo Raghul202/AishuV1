@@ -32,7 +32,8 @@ class MemoryOptimizer:
 
     def build_context(self, um: UserMemory, current_msg: str = "",
                       token_budget: int = DEFAULT_TOKEN_BUDGET,
-                      request_id: str = "") -> str:
+                      request_id: str = "",
+                      include_private: bool = True) -> str:
         """
         Build the memory context string for a user.
         Uses relevance ranking if current_msg is provided,
@@ -40,21 +41,28 @@ class MemoryOptimizer:
         """
         rid = request_id or "?"
 
-        if not um.has_long_term_memory() and not um.utm:
+        facts_source = self._visible_items(
+            um.ordinary_memory_items(um._ltm_facts), include_private)
+        prefs_source = self._visible_items(
+            um.ordinary_memory_items(um._ltm_prefs), include_private)
+        topics_source = self._visible_items(
+            um.ordinary_memory_items(um._ltm_topics), include_private)
+        utm_source = um.get_utm_for_context(include_private)
+        if not (facts_source or prefs_source or topics_source or utm_source):
             log.debug(f"[{rid}] build_context() -> empty (no LTM/UTM available)")
             return ""
 
         # Get relevant memories if we have a message to match against
         if current_msg:
-            facts  = self._select_relevant(um._ltm_facts, current_msg, MAX_FACTS_IN_PROMPT)
-            prefs  = self._select_relevant(um._ltm_prefs, current_msg, MAX_PREFS_IN_PROMPT)
-            topics = self._select_relevant(um._ltm_topics, current_msg, MAX_TOPICS_IN_PROMPT)
+            facts  = self._select_relevant(facts_source, current_msg, MAX_FACTS_IN_PROMPT)
+            prefs  = self._select_relevant(prefs_source, current_msg, MAX_PREFS_IN_PROMPT)
+            topics = self._select_relevant(topics_source, current_msg, MAX_TOPICS_IN_PROMPT)
         else:
-            facts  = self._top_by_importance(um._ltm_facts, MAX_FACTS_IN_PROMPT)
-            prefs  = self._top_by_importance(um._ltm_prefs, MAX_PREFS_IN_PROMPT)
-            topics = self._top_by_importance(um._ltm_topics, MAX_TOPICS_IN_PROMPT)
+            facts  = self._top_by_importance(facts_source, MAX_FACTS_IN_PROMPT)
+            prefs  = self._top_by_importance(prefs_source, MAX_PREFS_IN_PROMPT)
+            topics = self._top_by_importance(topics_source, MAX_TOPICS_IN_PROMPT)
 
-        utm_recent = um.utm[-MAX_UTM_IN_PROMPT:]
+        utm_recent = utm_source[-MAX_UTM_IN_PROMPT:]
 
         parts = []
         if facts:
@@ -73,9 +81,19 @@ class MemoryOptimizer:
 
         log.debug(
             f"[{rid}] build_context() facts={len(facts)} prefs={len(prefs)} "
-            f"topics={len(topics)} utm={len(utm_recent)} -> {full!r}"
+            f"topics={len(topics)} utm={len(utm_recent)} chars={len(full)}"
         )
         return full
+
+    @staticmethod
+    def _visible_items(items: list, include_private: bool) -> list:
+        if include_private:
+            return items
+        return [
+            item for item in items
+            if "visibility:public" in getattr(item, "tags", [])
+            and "visibility:private" not in getattr(item, "tags", [])
+        ]
 
     def _select_relevant(self, items: list, current_msg: str, limit: int) -> list:
         """
@@ -137,13 +155,17 @@ class MemoryOptimizer:
         return [m.content if hasattr(m, 'content') else str(m)
                 for m in sorted_items[:limit]]
 
-    def build_summary(self, um: UserMemory) -> str:
+    def build_summary(self, um: UserMemory, include_private: bool = False) -> str:
         """Very compact summary for extremely token-tight situations."""
         snippets = []
-        if um._ltm_facts:
-            snippets.append(um._ltm_facts[-1].content)
-        if um._ltm_prefs:
-            snippets.append(um._ltm_prefs[-1].content)
+        facts = self._visible_items(
+            um.ordinary_memory_items(um._ltm_facts), include_private)
+        prefs = self._visible_items(
+            um.ordinary_memory_items(um._ltm_prefs), include_private)
+        if facts:
+            snippets.append(facts[-1].content)
+        if prefs:
+            snippets.append(prefs[-1].content)
         return ("Quick context: " + "; ".join(snippets)) if snippets else ""
 
     def build_context_partner(self, um: UserMemory, current_msg: str = "",
@@ -198,7 +220,7 @@ class MemoryOptimizer:
         log.debug(
             f"[{rid}] build_context_partner() private_facts={len(p_facts)} "
             f"private_prefs={len(p_prefs)} facts={len(facts)} prefs={len(prefs)} "
-            f"topics={len(topics)} utm={len(utm_recent)} -> {full!r}"
+            f"topics={len(topics)} utm={len(utm_recent)} chars={len(full)}"
         )
         return full
 
@@ -267,7 +289,10 @@ class MemoryOptimizer:
         # Default: load LTM
         return True
 
-    def detect_promotion_candidates(self, um: UserMemory) -> list:
+    def detect_promotion_candidates(
+        self, um: UserMemory, conversation_scope: str = "public",
+        include_private: bool = False,
+    ) -> list:
         """
         Find UTM entries that appear frequently in recent STM.
         These are candidates for promotion to LTM.
@@ -275,9 +300,11 @@ class MemoryOptimizer:
         from config.settings import UTM_PROMOTION_HITS
         candidates = []
         stm_text   = " ".join(
-            m["content"].lower() for m in um.get_stm_list() if m["role"] == "user"
+            m["content"].lower()
+            for m in um.get_stm_list(conversation_scope)
+            if m["role"] == "user"
         )
-        for entry in um.utm:
+        for entry in um.get_utm_for_context(include_private):
             words     = [w for w in entry.lower().split() if len(w) > 4]
             hit_count = sum(stm_text.count(w) for w in words)
             if hit_count >= UTM_PROMOTION_HITS:

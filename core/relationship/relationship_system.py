@@ -196,10 +196,13 @@ class RelationshipSystem:
 
     # ─── Prompt context ───────────────────────────────────────────────────────
 
-    def describe_relationship(self, guild_id: int, user_id: int) -> str:
+    def describe_relationship(self, guild_id: int, user_id: int,
+                              private_partner_dm: bool = False) -> str:
         """Natural language description for the AI prompt."""
         rs   = self._get_state(guild_id, user_id)
         tier = self.get_tier(guild_id, user_id)
+        if tier == "partner" and not private_partner_dm:
+            tier = "special_person"
         descriptions = {
             "partner": (
                 "This is your life partner — the deepest bond you have with anyone. "

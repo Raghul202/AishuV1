@@ -62,6 +62,12 @@ class SettingsModal(discord.ui.Modal):
             except ValueError:
                 await interaction.response.send_message("❌ Age must be a number.", ephemeral=True)
                 return
+            if val < 18:
+                await interaction.response.send_message(
+                    "❌ Aishu's identity must remain adult (18 or older).",
+                    ephemeral=True,
+                )
+                return
         aishu_state.set(self.field, val, force_save=True)
         if self.field == "status_text":
             await interaction.client.change_presence(activity=discord.Game(name=val))
@@ -473,8 +479,8 @@ class AdminCog(commands.Cog, name="Admin"):
     # /setlover
     @app_commands.command(name="setlover",
                   description="Set Aishu's special person (Owner)")
-    @app_commands.describe(member="The member to set as Aishu's special person")
-    async def setlover(self, interaction: discord.Interaction, member: discord.Member):
+    @app_commands.describe(member="The user to set as Aishu's special person")
+    async def setlover(self, interaction: discord.Interaction, member: discord.User | discord.Member):
         if not _owner_only(interaction):
             await interaction.response.send_message("owner only!", ephemeral=True); return
         aishu_state.set_lover(member.id, member.display_name)
@@ -492,8 +498,8 @@ class AdminCog(commands.Cog, name="Admin"):
     # /setpartner
     @app_commands.command(name="setpartner",
                   description="Set Aishu's life partner — highest possible bond (Owner)")
-    @app_commands.describe(member="The member to set as Aishu's life partner")
-    async def setpartner(self, interaction: discord.Interaction, member: discord.Member):
+    @app_commands.describe(member="The user to set as Aishu's life partner")
+    async def setpartner(self, interaction: discord.Interaction, member: discord.User | discord.Member):
         if not _owner_only(interaction):
             await interaction.response.send_message("owner only!", ephemeral=True); return
         aishu_state.set_partner(member.id, member.display_name)
@@ -681,14 +687,21 @@ class AdminCog(commands.Cog, name="Admin"):
         personality_tokens = len(aishu_state.build_personality_block()) // 4
         mem_context        = memory_optimizer.build_context(um, token_budget=600)
         memory_tokens      = len(mem_context) // 4 if mem_context else 0
-        stm_tokens         = sum(len(str(m)) for m in um.stm) // 4
+        stm_tokens         = sum(
+            len(str(message))
+            for stream in um._conversation_stm.values()
+            for message in stream
+        ) // 4
         total_est          = identity_tokens + personality_tokens + memory_tokens + stm_tokens + 30
 
         # Best/current model
         best = model_controller.best_model()
 
         # Memory snippets (last 5 LTM facts)
-        snippets = [m.content[:70] for m in um._ltm_facts[-5:]]
+        snippets = [
+            m.content[:70]
+            for m in um.ordinary_memory_items(um._ltm_facts)[-5:]
+        ]
 
         embed = discord.Embed(
                 title       = "🌸 Aishu Brain Inspect",
@@ -718,7 +731,7 @@ class AdminCog(commands.Cog, name="Admin"):
                 f"Messages: **{um.message_count}**\n"
                 f"LTM facts: **{len(um._ltm_facts)}**\n"
                 f"LTM prefs: **{len(um._ltm_prefs)}**\n"
-                f"STM msgs: **{len(um.stm)}**"
+                f"STM msgs: **{sum(len(stream) for stream in um._conversation_stm.values())}**"
             ),
             inline= True,
         )
@@ -943,15 +956,15 @@ class AdminCog(commands.Cog, name="Admin"):
             "user_id":    um.user_id,
             "username":   um.username,
             "messages":   um.message_count,
-            "stm_count":  len(um.stm),
+            "stm_count":  sum(len(stream) for stream in um._conversation_stm.values()),
             "utm_count":  len(um.utm),
             "ltm_facts":  [
                 {"content": m.content[:60], "imp": m.importance, "hits": m.mention_count}
-                for m in um._ltm_facts[-5:]
+                for m in um.ordinary_memory_items(um._ltm_facts)[-5:]
             ],
             "ltm_prefs":  [
                 {"content": m.content[:60], "imp": m.importance}
-                for m in um._ltm_prefs[-5:]
+                for m in um.ordinary_memory_items(um._ltm_prefs)[-5:]
             ],
         }
         js = json.dumps(data, indent=2, ensure_ascii=False)
@@ -1143,7 +1156,11 @@ class AdminCog(commands.Cog, name="Admin"):
         embed.add_field(name="User ID", value=str(m.id), inline=True)
         embed.add_field(name="Message Count", value=str(um.message_count), inline=True)
         embed.add_field(name="Streak", value=f"{um.current_streak} days", inline=True)
-        embed.add_field(name="STM", value=f"{len(um.stm)} messages", inline=True)
+        embed.add_field(
+            name="STM",
+            value=f"{sum(len(stream) for stream in um._conversation_stm.values())} messages",
+            inline=True,
+        )
         embed.add_field(name="UTM", value=f"{len(um.utm)} candidate facts", inline=True)
         embed.add_field(name="LTM Facts", value=f"{len(um._ltm_facts)} items", inline=True)
         embed.add_field(name="LTM Prefs", value=f"{len(um._ltm_prefs)} items", inline=True)

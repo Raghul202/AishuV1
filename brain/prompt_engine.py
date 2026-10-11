@@ -32,10 +32,12 @@ class PromptEngine:
         is_partner_dm: bool = False,
         partner_side:  str  = "private",
         skip_ltm:      bool = False,
+        memory_allowed: bool = True,
+        relationship_allowed: bool = True,
     ) -> tuple:
         ctx = PromptContextPacket(request_id=request_id or "?")
 
-        is_rp_active = is_partner_dm and um.roleplay.is_active
+        is_rp_active = is_partner_dm and memory_allowed and um.roleplay.is_active
 
         if is_rp_active:
             route_name = "roleplay"
@@ -43,21 +45,27 @@ class PromptEngine:
         elif is_partner_dm:
             route_name = f"partner:{partner_side}"
             prompt, memory_block, server_block = self._build_partner_prompt(
-                aishu, um, current_msg, partner_side=partner_side, request_id=request_id)
+                aishu, um, current_msg, partner_side=partner_side,
+                request_id=request_id, memory_allowed=memory_allowed)
         elif skip_ltm:
             route_name = "minimal"
-            prompt, memory_block, server_block = self._build_minimal_prompt(aishu, um, guild_id)
+            prompt, memory_block, server_block = self._build_minimal_prompt(
+                aishu, um, guild_id, relationship_allowed=relationship_allowed)
         else:
             # Decide full vs standard based on message length / content
             needs_full = len(current_msg) > 60
             if needs_full:
                 route_name = "full"
                 prompt, memory_block, server_block = self._build_full_prompt(
-                    aishu, um, guild_id, server_topics, current_msg, request_id=request_id)
+                    aishu, um, guild_id, server_topics, current_msg,
+                    request_id=request_id, memory_allowed=memory_allowed,
+                    relationship_allowed=relationship_allowed)
             else:
                 route_name = "standard"
                 prompt, memory_block, server_block = self._build_standard_prompt(
-                    aishu, um, guild_id, current_msg, request_id=request_id)
+                    aishu, um, guild_id, current_msg,
+                    request_id=request_id, memory_allowed=memory_allowed,
+                    relationship_allowed=relationship_allowed)
 
         ctx.memory_block     = memory_block
         ctx.server_block     = server_block
@@ -141,6 +149,7 @@ class PromptEngine:
         self, aishu: AishuState, um: UserMemory, current_msg: str,
         partner_side: str = "private",
         request_id: str = "",
+        memory_allowed: bool = True,
     ) -> tuple:
         mood         = aishu.mood.mood
         name         = aishu.partner_name or um.display_name
@@ -180,7 +189,9 @@ class PromptEngine:
 
         # A partner can explicitly switch to their normal conversation context
         # for recall questions. Keep private/roleplay memories out of that route.
-        if partner_side == "normal":
+        if not memory_allowed:
+            mem_block = ""
+        elif partner_side == "normal":
             mem_block = memory_optimizer.build_context(
                 um, current_msg=current_msg, token_budget=300, request_id=request_id)
         else:
@@ -196,9 +207,11 @@ class PromptEngine:
 
     def _build_minimal_prompt(
         self, aishu: AishuState, um: UserMemory, guild_id: int,
+        relationship_allowed: bool = True,
     ) -> tuple:
         mood = aishu.mood.mood
-        bond = self._get_bond(aishu, um, guild_id)
+        bond = self._get_bond(
+            aishu, um, guild_id, relationship_allowed=relationship_allowed)
         tone = self._mood_to_tone(mood)
         ctx  = "dm" if guild_id == 0 else "server"
         prompt = (
@@ -214,9 +227,12 @@ class PromptEngine:
     def _build_standard_prompt(
         self, aishu: AishuState, um: UserMemory,
         guild_id: int, current_msg: str, request_id: str = "",
+        memory_allowed: bool = True,
+        relationship_allowed: bool = True,
     ) -> tuple:
         mood = aishu.mood.mood
-        bond = self._get_bond(aishu, um, guild_id)
+        bond = self._get_bond(
+            aishu, um, guild_id, relationship_allowed=relationship_allowed)
         tone = self._mood_to_tone(mood)
         ctx  = "dm" if guild_id == 0 else "server"
 
@@ -230,9 +246,12 @@ class PromptEngine:
         rel_block = aishu.build_user_relationship_block(
             user_id=um.user_id, guild_id=guild_id,
             username=um.username, display_name=um.display_name,
+            private_partner_dm=False,
+            relationship_allowed=relationship_allowed,
         )
         mem_block = memory_optimizer.build_context(
-            um, current_msg=current_msg, token_budget=200, request_id=request_id)
+            um, current_msg=current_msg, token_budget=200, request_id=request_id,
+            include_private=guild_id == 0) if memory_allowed else ""
 
         sections = [AISHU_COMPACT_IDENTITY.strip(), state_block]
         if rel_block:
@@ -247,10 +266,12 @@ class PromptEngine:
     def _build_full_prompt(
         self, aishu: AishuState, um: UserMemory,
         guild_id: int, server_topics: list, current_msg: str,
-        request_id: str = "",
+        request_id: str = "", memory_allowed: bool = True,
+        relationship_allowed: bool = True,
     ) -> tuple:
         mood = aishu.mood.mood
-        bond = self._get_bond(aishu, um, guild_id)
+        bond = self._get_bond(
+            aishu, um, guild_id, relationship_allowed=relationship_allowed)
         tone = self._mood_to_tone(mood)
         ctx  = "dm" if guild_id == 0 else "server"
 
@@ -260,15 +281,18 @@ class PromptEngine:
         )
         if aishu.custom_note:
             state_block += f"\nnote={aishu.custom_note}"
-        if aishu.lover_name and aishu.is_lover(um.user_id):
+        if relationship_allowed and aishu.lover_name and aishu.is_lover(um.user_id):
             state_block += f"\nlover={aishu.lover_name}"
 
         rel_block = aishu.build_user_relationship_block(
             user_id=um.user_id, guild_id=guild_id,
             username=um.username, display_name=um.display_name,
+            private_partner_dm=False,
+            relationship_allowed=relationship_allowed,
         )
         mem_block = memory_optimizer.build_context(
-            um, current_msg=current_msg, token_budget=350, request_id=request_id)
+            um, current_msg=current_msg, token_budget=350, request_id=request_id,
+            include_private=guild_id == 0) if memory_allowed else ""
 
         sections = [AISHU_COMPACT_IDENTITY.strip(), state_block]
         if rel_block:
@@ -284,10 +308,17 @@ class PromptEngine:
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
 
-    def _get_bond(self, aishu: AishuState, um: UserMemory, guild_id: int) -> str:
-        if aishu.is_partner(um.user_id):  return "partner"
-        if aishu.is_lover(um.user_id):    return "special_person"
-        return aishu.relationships.get_tier(guild_id, um.user_id)
+    def _get_bond(
+        self, aishu: AishuState, um: UserMemory, guild_id: int,
+        private_partner_dm: bool = False,
+        relationship_allowed: bool = True,
+    ) -> str:
+        if aishu.is_partner(um.user_id) and private_partner_dm:  return "partner"
+        if relationship_allowed and aishu.is_lover(um.user_id):    return "special_person"
+        if not relationship_allowed:
+            return "neutral"
+        tier = aishu.relationships.get_tier(guild_id, um.user_id)
+        return "special_person" if tier == "partner" else tier
 
     def _mood_to_tone(self, mood: str) -> str:
         return {
@@ -330,7 +361,7 @@ class PromptEngine:
             "angry":   "short and direct",
         }
         hint = hints.get(mood, "be yourself")
-        return f"[style] {hint} | short replies | no 'I' opener | no assistant-speak"
+        return f"[style] {hint} | short replies | no 'I' opener | no assistant-speak | when mentioning a user format as <@userid> or use their name, never @userid"
 
     def build_messages(
         self, system_prompt: str, stm: list, user_message: str,

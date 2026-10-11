@@ -120,17 +120,41 @@ class AishuDatabase:
             data = dict(user)
             data.pop("roleplay_json", None)
             data["roleplay"] = json.loads(user["roleplay_json"] or "{}")
-            for scope, prefix in (("normal", ""), ("partner", "partner_")):
-                rows = db.execute("SELECT * FROM conversations WHERE user_id=? AND scope=? ORDER BY id DESC LIMIT 12", (user_id, scope)).fetchall()
-                data[f"{prefix}stm"] = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+            streams: dict[str, list] = {}
+            recent_scopes = db.execute(
+                """SELECT scope FROM conversations WHERE user_id=?
+                   GROUP BY scope ORDER BY MAX(id) DESC LIMIT 16""",
+                (user_id,),
+            ).fetchall()
+            for scope_row in recent_scopes:
+                scope = scope_row["scope"]
+                rows = db.execute(
+                    """SELECT role,content FROM conversations
+                       WHERE user_id=? AND scope=? ORDER BY id DESC LIMIT 12""",
+                    (user_id, scope),
+                ).fetchall()
+                streams[scope] = [
+                    {"role": row["role"], "content": row["content"]}
+                    for row in reversed(rows)
+                ]
+            data["conversation_stm"] = streams
+            data["stm"] = streams.get("normal", [])
+            data["partner_stm"] = streams.get("partner", [])
+
+            for scope in ("normal", "partner"):
                 mems = db.execute("SELECT * FROM memories WHERE user_id=? AND scope=? AND archived_at IS NULL ORDER BY updated_at", (user_id, scope)).fetchall()
                 buckets: dict[str, list] = {"fact": [], "pref": [], "topic": [], "utm": []}
+                public_utm = []
                 for r in mems:
                     target = "utm" if r["layer"] == "utm" else r["category"]
                     item = {"content": r["content"], "layer": r["layer"], "source": r["source"], "category": r["category"], "importance": r["importance"], "confidence": r["confidence"], "mention_count": r["mention_count"], "created_at": r["created_at"], "updated_at": r["updated_at"], "item_id": r["id"], "tags": json.loads(r["tags_json"])}
                     buckets.setdefault(target, []).append(item if target != "utm" else r["content"])
+                    if (target == "utm"
+                            and "visibility:public" in json.loads(r["tags_json"])
+                            and "visibility:private" not in json.loads(r["tags_json"])):
+                        public_utm.append(r["content"])
                 if scope == "normal":
-                    data.update(ltm_facts=buckets["fact"], ltm_prefs=buckets["pref"], ltm_topics=buckets["topic"], utm=buckets["utm"])
+                    data.update(ltm_facts=buckets["fact"], ltm_prefs=buckets["pref"], ltm_topics=buckets["topic"], utm=buckets["utm"], utm_public=public_utm)
                 else:
                     data.update(partner_ltm_facts=buckets["fact"], partner_ltm_prefs=buckets["pref"])
             return data
@@ -143,42 +167,53 @@ class AishuDatabase:
             db.execute("""INSERT INTO users(user_id,username,display_name,first_seen,last_seen,message_count,current_streak,longest_streak,last_streak_date,roleplay_json)
                 VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,last_seen=excluded.last_seen,message_count=excluded.message_count,current_streak=excluded.current_streak,longest_streak=excluded.longest_streak,last_streak_date=excluded.last_streak_date,roleplay_json=excluded.roleplay_json""",
                 (data["user_id"], data["username"], data["display_name"], data["first_seen"], data["last_seen"], data["message_count"], data["current_streak"], data["longest_streak"], data["last_streak_date"], json.dumps(data.get("roleplay", {}), ensure_ascii=False)))
-            for scope, messages in (("normal", data.get("stm", [])), ("partner", data.get("partner_stm", []))):
-                incoming = [
-                    (m["role"], m["content"][:4000])
-                    for m in messages
-                    if m.get("role") in ("user", "assistant") and m.get("content")
-                ][-12:]
-                existing = [
-                    (row["role"], row["content"])
-                    for row in reversed(db.execute(
-                        "SELECT role, content FROM conversations WHERE user_id=? AND scope=? ORDER BY id DESC LIMIT 12",
-                        (data["user_id"], scope),
-                    ).fetchall())
-                ]
-                if not incoming:
-                    db.execute("DELETE FROM conversations WHERE user_id = ? AND scope = ?", (data["user_id"], scope))
-                else:
-                    overlap = 0
-                    for size in range(min(len(existing), len(incoming)), 0, -1):
-                        if existing[-size:] == incoming[:size]:
-                            overlap = size
-                            break
-                    if overlap == 0 and existing:
+            conversation_streams = data.get("conversation_stm")
+            if not isinstance(conversation_streams, dict):
+                conversation_streams = {
+                    "normal": data.get("stm", []),
+                    "partner": data.get("partner_stm", []),
+                }
+            if data.get("clear_conversations"):
+                db.execute("DELETE FROM conversations WHERE user_id=?",
+                           (data["user_id"],))
+            else:
+                for scope, messages in conversation_streams.items():
+                    scope = str(scope)
+                    incoming = [
+                        (m["role"], m["content"][:4000])
+                        for m in messages
+                        if m.get("role") in ("user", "assistant") and m.get("content")
+                    ][-12:]
+                    existing = [
+                        (row["role"], row["content"])
+                        for row in reversed(db.execute(
+                            "SELECT role, content FROM conversations WHERE user_id=? AND scope=? ORDER BY id DESC LIMIT 12",
+                            (data["user_id"], scope),
+                        ).fetchall())
+                    ]
+                    if not incoming:
                         db.execute("DELETE FROM conversations WHERE user_id = ? AND scope = ?", (data["user_id"], scope))
-                        new_rows = incoming
                     else:
-                        new_rows = incoming[overlap:]
-                    if new_rows:
-                        db.executemany(
-                            "INSERT INTO conversations(user_id,scope,role,content) VALUES(?,?,?,?)",
-                            [(data["user_id"], scope, role, content) for role, content in new_rows],
-                        )
-                    db.execute("""DELETE FROM conversations
-                        WHERE user_id = ? AND scope = ? AND id NOT IN (
-                            SELECT id FROM conversations WHERE user_id = ? AND scope = ?
-                            ORDER BY id DESC LIMIT ?
-                        )""", (data["user_id"], scope, data["user_id"], scope, len(incoming)))
+                        overlap = 0
+                        for size in range(min(len(existing), len(incoming)), 0, -1):
+                            if existing[-size:] == incoming[:size]:
+                                overlap = size
+                                break
+                        if overlap == 0 and existing:
+                            db.execute("DELETE FROM conversations WHERE user_id = ? AND scope = ?", (data["user_id"], scope))
+                            new_rows = incoming
+                        else:
+                            new_rows = incoming[overlap:]
+                        if new_rows:
+                            db.executemany(
+                                "INSERT INTO conversations(user_id,scope,role,content) VALUES(?,?,?,?)",
+                                [(data["user_id"], scope, role, content) for role, content in new_rows],
+                            )
+                        db.execute("""DELETE FROM conversations
+                            WHERE user_id = ? AND scope = ? AND id NOT IN (
+                                SELECT id FROM conversations WHERE user_id = ? AND scope = ?
+                                ORDER BY id DESC LIMIT ?
+                            )""", (data["user_id"], scope, data["user_id"], scope, len(incoming)))
             rows = []
             memory_sets = (
                 ("normal", (("ltm_facts", "fact"), ("ltm_prefs", "pref"), ("ltm_topics", "topic"))),
@@ -196,11 +231,15 @@ class AishuDatabase:
                             if not item_id or not str(item_id).startswith(f"{uid}:"):
                                 item_id = default_id
                             rows.append((item_id, uid, scope, "ltm", category, content, key(content), item.get("source", "inferred"), int(item.get("importance", 5)), float(item.get("confidence", .7)), int(item.get("mention_count", 1)), json.dumps(item.get("tags", [])), item.get("created_at", data["first_seen"]), item.get("updated_at", data["last_seen"])))
+            public_utm_keys = {
+                key(str(content).strip()[:500]) for content in data.get("utm_public", [])
+            }
             for content in data.get("utm", []):
                 content = str(content).strip()[:500]
                 if content:
                     uid = data["user_id"]
-                    rows.append((f"{uid}:utm:{key(content)}", uid, "normal", "utm", "utm", content, key(content), "inferred", 3, .5, 1, "[]", data["last_seen"], data["last_seen"]))
+                    visibility_tags = ["visibility:public"] if key(content) in public_utm_keys else ["visibility:private"]
+                    rows.append((f"{uid}:utm:{key(content)}", uid, "normal", "utm", "utm", content, key(content), "inferred", 3, .5, 1, json.dumps(visibility_tags), data["last_seen"], data["last_seen"]))
             # Preserve existing IDs when importing legacy data whose IDs may not
             # use the current stable-key convention. This also avoids a secondary
             # unique-key collision when two old records normalize to one memory.

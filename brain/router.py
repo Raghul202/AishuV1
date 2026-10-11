@@ -55,7 +55,7 @@ def _wants_normal_memory(text: str) -> bool:
 
 def _memory_debug_counts(um) -> dict:
     return {
-        "stm_messages":         len(um.get_stm_list()),
+        "stm_messages":         sum(len(stream) for stream in um._conversation_stm.values()),
         "utm_entries":          len(um.utm),
         "ltm_facts":            len(um._ltm_facts),
         "ltm_prefs":            len(um._ltm_prefs),
@@ -125,9 +125,13 @@ class BrainRouter:
                 memory_allowed = False
             if guild_config.relationship_mode == "disabled":
                 relationship_allowed = False
+        if not guild_id and not is_dm:
+            memory_allowed = False
+            relationship_allowed = False
 
         # ── 1. Memory load ────────────────────────────────────────────────────
-        if not memory_manager.is_memory_available():
+        if (not memory_manager.is_memory_available()
+                or not memory_manager.is_memory_enabled()):
             memory_allowed = False
 
         um = memory_manager.load(user_id, username, display_name)
@@ -139,7 +143,7 @@ class BrainRouter:
         # ── 3. Roleplay detection (partner DM only) ───────────────────────────
         rp_exit_response = None
 
-        if is_partner_dm:
+        if is_partner_dm and memory_allowed:
             rp  = um.roleplay
             tl  = text.lower()
 
@@ -186,10 +190,17 @@ class BrainRouter:
         reasoning = reasoning_engine.analyze(text)
 
         # ── 5. Server context ─────────────────────────────────────────────────
-        server_topics = memory_manager.get_server_topics(guild_id) if guild_id else []
+        personal_memory_allowed = memory_allowed and (bool(guild_id) or is_dm)
+        server_topics = (
+            memory_manager.get_server_topics(guild_id)
+            if guild_id and memory_allowed else []
+        )
 
         # ── 6. Mood boost ─────────────────────────────────────────────────────
-        rel_tier = aishu_state.relationships.get_tier(guild_id, user_id)
+        rel_tier = (
+            aishu_state.relationships.get_tier(guild_id, user_id)
+            if relationship_allowed else "stranger"
+        )
         aishu_state.mood.apply_relationship_boost(rel_tier)
 
         # ── 7. Partner memory side selection ─────────────────────────────────
@@ -206,7 +217,7 @@ class BrainRouter:
 
         # ── 8. LTM skip decision ──────────────────────────────────────────────
         # During active roleplay — skip normal LTM (roleplay has its own memory)
-        is_rp_active = is_partner_dm and um.roleplay.is_active
+        is_rp_active = is_partner_dm and personal_memory_allowed and um.roleplay.is_active
         skip_ltm = is_rp_active or not memory_optimizer.needs_ltm(
             text, reasoning.intent, is_partner_dm)
 
@@ -229,6 +240,8 @@ class BrainRouter:
             is_partner_dm  = is_partner_dm,
             partner_side   = partner_side,
             skip_ltm       = skip_ltm,
+            memory_allowed = personal_memory_allowed,
+            relationship_allowed = relationship_allowed,
         )
 
         hint = reasoning_engine.build_reasoning_hint(reasoning)
@@ -241,16 +254,31 @@ class BrainRouter:
         )
         log.debug(
             f"[{packet.request_id}] memory-context loaded={bool(ctx.memory_block)} "
-            f"shared_included={bool(ctx.server_block)} global_included=False "
-            f"memory_block={ctx.memory_block!r} server_block={ctx.server_block!r}"
+            f"shared_included={bool(ctx.server_block)} global_included=False"
         )
 
         # ── 10. Build messages (STM trimmed by roleplay if active) ────────────
-        if is_partner_dm and partner_side == "private":
+        if not personal_memory_allowed:
+            stm_to_use = []
+        elif is_partner_dm and partner_side == "private":
             # get_partner_stm_list() auto-trims to roleplay limit when RP is active
             stm_to_use = um.get_partner_stm_list()
+        elif is_partner_dm:
+            stm_to_use = (
+                um.get_stm_list("partner_normal")
+                + um.get_stm_list("private")
+                + um.get_stm_list("normal")
+            )
+        elif is_dm:
+            stm_to_use = (
+                um.get_stm_list("private")
+                + um.get_stm_list("normal")
+            ) if personal_memory_allowed else []
         else:
-            stm_to_use = um.get_stm_list()
+            stm_to_use = (
+                um.get_stm_list(f"guild:{guild_id}")
+                if personal_memory_allowed else []
+            )
 
         messages = prompt_engine.build_messages(
             system_prompt = system_prompt,
@@ -345,6 +373,9 @@ class BrainRouter:
                         memory_manager.record_conversation(
                             packet.user_id, packet.username, packet.display_name,
                             packet.text, raw_reply,
+                            conversation_scope="partner_normal",
+                            visibility="private",
+                            extract_memory=False,
                         )
 
                     # Roleplay episode memory recording
@@ -368,16 +399,30 @@ class BrainRouter:
                     memory_manager.record_conversation(
                         packet.user_id, packet.username, packet.display_name,
                         packet.text, raw_reply,
+                        conversation_scope=(
+                            "private" if not packet.guild_id
+                            else f"guild:{packet.guild_id}"
+                        ),
+                        visibility="private" if not packet.guild_id else "public",
                     )
 
                 # UTM promotion (non-roleplay only — don't pollute normal LTM with RP content)
-                if not is_rp_active:
-                    candidates = memory_manager.detect_promotion_candidates(packet.user_id)
+                if not is_rp_active and not is_partner_dm:
+                    candidates = memory_manager.detect_promotion_candidates(
+                        packet.user_id,
+                        conversation_scope=(
+                            f"guild:{packet.guild_id}" if packet.guild_id else "private"
+                        ),
+                        include_private=not bool(packet.guild_id),
+                    )
                     um_ref     = memory_manager.get(packet.user_id)
                     if um_ref and candidates:
                         for c in candidates:
                             um_ref.promote_utm_to_ltm(c, source="promoted")
-                            log.debug(f"[{packet.request_id}] UTM→LTM: {c[:50]}")
+                        log.debug(
+                            "[%s] promoted %d UTM entries to LTM",
+                            packet.request_id, len(candidates),
+                        )
 
             if memory_allowed and packet.guild_id and len(packet.text) > 20:
                 memory_manager.record_server_topic(packet.guild_id, packet.text[:100])
